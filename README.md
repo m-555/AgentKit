@@ -220,6 +220,14 @@ integration and new dependent launches continue. An attached external manager
 requires a live bridge and lease; confirmed bridge termination permits a CLI
 replacement on the same pin. This does not wake the original native chat.
 
+If the pinned manager's account stays unavailable, the user can appoint another
+control profile with `agentkit manager repin JOB --profile NAME --evidence-file
+decision.md`. It is refused while the old manager's lease is fresh or a session
+still owns the job. It records the decision in the job and opens a new recovery
+epoch that the new manager must audit and acknowledge. `agentkit manager handover
+JOB --holder NAME --pid PID` moves an attached manager lease to the user's next
+chat session on the same pin; the previous credential stops working.
+
 Quota waits do not use task failure attempts or ask the human to intervene.
 Authentication problems and genuinely missing product decisions remain explicit
 blockers. Repeated task failures return to the coordinator for inspection.
@@ -244,7 +252,14 @@ agentkit providers check
 agentkit events --task 7
 agentkit why merge-failed 7
 agentkit integrate                     # manually process approved merge queue
+agentkit usage                         # project-wide recorded tokens; calls no model
+agentkit recovery status               # pending recovery and wake intents
+python -m agentkit.dashboard --root . --open   # local web dashboard, read-only by default
 ```
+
+The dashboard's **Live agent screens** mirror registered Windows console windows.
+[Live monitor](docs/live-monitor.md) covers project usage totals and opt-in line
+input to an interactive CLI manager (`agentkit terminal register-manager`).
 
 Commit `.ai/project.yaml`, `.ai/tasks.yaml`, `.ai/jobs/*.json` and project skills
 as project records. SQLite runtime state, quota windows and process logs live
@@ -288,6 +303,48 @@ one planner/manager, structured user job files, automatic tester handoffs, bound
 fresh worker sessions, role model/effort choices and local human approval controls.
 The dashboard is read-only by default; operator controls save decisions and idle
 project settings without starting AI jobs.
+
+## Recent changes
+
+Since 2026-10-04:
+
+**Features**
+
+- **Manager re-pin and handover:** `agentkit manager repin` and `agentkit manager handover`
+  (see [automatic lifecycle](#automatic-lifecycle-and-quota-recovery)).
+- **Project usage:** `agentkit usage` totals the recorded tokens of every launch without
+  calling a model; `--backfill` saves receipts from older stopped logs.
+- **Live agent screens:** the dashboard mirrors registered Windows console windows, and an
+  interactive CLI manager can opt into one-line input.
+- **Shared recovery and wake:** durable recovery intents for CLI and editor managers,
+  inspected with `agentkit recovery status|capabilities|cancel` and shown in the dashboard.
+- **Preserved failing tests:** a manager can hold an independent failing test with
+  `test_hold`; once the source fix is accepted, `test_refresh` carries the byte-identical
+  test forward instead of paying another session to rewrite it.
+- **Bounded manager queries:** `job_brief` pages job history to keep manager context small
+  ([manager efficiency](docs/operations/manager-query-efficiency.md)).
+- **Private browser checks:** Playwright gates test the assigned worktree through its own
+  server and port ([browser checks](docs/browser-checks.md)).
+
+**Fixes**
+
+- A session launched for one task can read only that task's brief.
+- Local Qwen workers read only the files their task declares; glob, grep and directory
+  listings are denied.
+- A local worker's standing task rules survive context compaction, and worker prompts
+  state that the host normalizes line endings.
+- Every worker provider commits through the host's `task_commit` tool.
+- A monitor-side fault, such as a locked database during a heartbeat, no longer stops a
+  healthy worker or uses one of its attempts.
+- Recovery evidence and Git merges are gathered outside database write transactions, so
+  other writers no longer time out on large projects.
+- Operator leases stay alive across supervisor passes.
+- A retry whose stopped attempt preserved nothing starts fresh instead of receiving a
+  continuation packet.
+- Windows process checks use complete PID snapshots and process identity, so a recycled
+  PID is not mistaken for a live worker.
+- Quota recovery handles manual resets, fences stale native returns and retries confirmed
+  capacity failures after the quota wakes.
 
 ## License
 
