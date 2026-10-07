@@ -1,0 +1,65 @@
+[project]
+name = "agentkit-orchestrator"
+dynamic = ["version"]
+description = "Task graph, file-ownership leases and gates shared by Claude Code and Codex workers."
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+agentkit = "agentkit.cli:main"
+agentkit-mcp = "agentkit.mcp_server:main"
+agentkit-hook = "agentkit.hooks_cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "agentkit/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentkit"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../plugins/agentkit/agents" = "agentkit/data/agents"
+"../plugins/agentkit/skills" = "agentkit/data/skills"
+"../plugins/agentkit/templates" = "agentkit/data/templates"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 96
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # Fail-open paths are deliberate: a bug in a hook must never wedge a session,
+    # and the enforcement layers that must not fail open (L6, L7) live in core and
+    # are excluded from that handling explicitly. See hooks_cli.STRICT_EVENTS.
+    "BLE001",
+    # We check returncode ourselves wherever it matters; `check=True` would turn
+    # an expected non-zero (a failing gate, a rejected merge) into an exception.
+    "PLW1510",
+    # Long lines inside explanatory comments and error messages are intentional.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059", "SIM117", "B011"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+# Not strict: this codebase uses dict-shaped records from SQLite deliberately,
+# and annotating them into TypedDicts would add surface without preventing a
+# failure any test has ever caught.
+check_untyped_defs = true

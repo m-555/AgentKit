@@ -1,0 +1,91 @@
+{
+  "description": "AgentKit enforcement: blocks edits outside a task's lease, injects the task brief at session start, and checkpoints automatically before compaction and on stop. Every hook no-ops in repositories that have no .ai/project.yaml, so installing the plugin globally is safe.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook session-start",
+            "timeout": 45,
+            "statusMessage": "Loading AgentKit brief"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook pre-tool-use",
+            "timeout": 20,
+            "statusMessage": "Checking file ownership"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook pre-compact",
+            "timeout": 60,
+            "statusMessage": "Checkpointing before compaction"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook stop",
+            "timeout": 60,
+            "async": true,
+            "statusMessage": "Saving checkpoint"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook stop",
+            "timeout": 60,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook worktree-create",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agentkit-hook permission-denied",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

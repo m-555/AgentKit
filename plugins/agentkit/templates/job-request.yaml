@@ -1,0 +1,9 @@
+# Submit with: agentkit --path PROJECT workflow import-job --file job-request.yaml
+# Import saves the request; it does not start a supervisor or launch an AI session.
+id: example-feature
+coordinator: auto
+request: |
+  Describe one feature and the existing behavior that must be preserved.
+acceptance:
+  - Describe an observable success condition.
+  - Describe an important failure or boundary condition.

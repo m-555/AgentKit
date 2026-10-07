@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agentkit-local",
+  "description": "Marketplace hosting AgentKit, a multi-agent development framework for Claude Code and Codex.",
+  "owner": {
+    "name": "m-555"
+  },
+  "plugins": [
+    {
+      "name": "agentkit",
+      "description": "Multi-agent development framework: enforced file ownership, automatic checkpoints, dependency-aware task graph, and a decoupling workflow that makes parallel agents safe on large codebases.",
+      "author": {
+        "name": "m-555"
+      },
+      "category": "workflow",
+      "source": "./plugins/agentkit"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.test-artifacts/
+# Local audit fixtures and logs, including nested temporary Git repositories.
+/orchestrator/.pytest-*/
+/orchestrator/.pytest-*.txt
+/orchestrator/.audit-*/
+/orchestrator/.*-audit.txt
+.coverage
+htmlcov/
+
+# uv
+uv.lock
+
+# AgentKit state. Runtime state is never committed (PLAN_V3.md §4.1: exactly
+# one authority per fact). In this public repository the self-hosting spec
+# (.ai/tasks.yaml, .ai/project.yaml, .ai/jobs/) also stays local.
+/.ai/
+.ai/tasks.db
+.ai/tasks.db-wal
+.ai/tasks.db-shm
+.ai/runtime/
+.ai/capabilities.json
+.ai/githooks/
+.ai/env-fingerprint
+
+# Worker worktrees live beside the repo, but guard against stray ones inside it
+wt-*/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+
+.claude/settings.local.json
+
+.codex/hooks.json
+
+# Secrets and personal local files
+.env
+.env.*
+*.local.md
+*.log
+.vscode/
+.codex/

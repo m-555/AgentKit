@@ -1,0 +1,7 @@
+{
+  "agentkit": {
+    "type": "stdio",
+    "command": "agentkit-mcp",
+    "args": []
+  }
+}

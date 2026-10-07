@@ -1,0 +1,17 @@
+{
+  "name": "agentkit",
+  "description": "Multi-agent development framework. Gives Claude Code and Codex a shared task graph, enforced per-task file ownership, automatic checkpoints on context compaction, declarative test gates, and a measured decoupling workflow for hotspot files.",
+  "version": "0.2.0",
+  "author": {
+    "name": "m-555"
+  },
+  "homepage": "https://github.com/m-555/AgentKit",
+  "repository": "https://github.com/m-555/AgentKit",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "worktree",
+    "refactoring"
+  ]
+}

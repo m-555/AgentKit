@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentKit · Sessions</title>
+<style>
+:root { color-scheme: dark; --bg:#0c1017; --panel:#151b25; --border:#293242;
+  --text:#e5eaf3; --muted:#9da9bd; --green:#77dbad; --amber:#ecc27a; --blue:#98b6ff; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1536px; margin:auto; padding:32px; }
+header { display:flex; justify-content:space-between; align-items:center; gap:20px; }
+h1 { font-size:26px; line-height:1.2; margin:0 0 6px; letter-spacing:-.5px; }
+.subtitle, .muted { color:var(--muted); }
+.subtitle { margin:0; }
+.pill { border:1px solid var(--border); border-radius:999px; padding:5px 12px;
+  font-size:12px; white-space:nowrap; color:var(--muted); }
+.toolbar { display:flex; gap:20px; align-items:center; justify-content:space-between;
+  margin:24px 0 18px; padding:14px 0; border-block:1px solid var(--border); }
+label { display:flex; gap:9px; align-items:center; cursor:pointer; }
+input { accent-color:var(--blue); width:16px; height:16px; }
+.statusline { color:var(--muted); font-size:12px; text-align:right; }
+.summary { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:24px; }
+.stat { background:var(--panel); border:1px solid var(--border); border-radius:12px;
+  padding:14px 18px; }
+.stat strong { display:block; font-size:24px; font-weight:650; }
+.stat span { color:var(--muted); font-size:12px; }
+#notice { border:1px solid #614a2c; color:var(--amber); background:#211b14;
+  border-radius:10px; padding:12px 16px; margin-bottom:20px; }
+#notice[hidden] { display:none; }
+.section-title { margin:26px 0 12px; font-size:14px; font-weight:650; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,390px),1fr)); gap:16px; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:14px;
+  padding:20px; min-width:0; }
+.cardhead { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.role { font-weight:650; font-size:16px; overflow-wrap:anywhere; }
+.identity { color:var(--muted); font-size:12px; margin:4px 0 16px; overflow-wrap:anywhere; }
+.badge { font-size:11px; letter-spacing:.6px; border:1px solid currentColor;
+  border-radius:6px; padding:4px 8px; flex-shrink:0; color:var(--muted); }
+.badge.running { color:var(--green); background:#77dbad0a; }
+.badge.waiting { color:var(--amber); background:#ecc27a0a; }
+.badge.review { color:var(--blue); background:#98b6ff0a; }
+.badge.alert { color:#ffa49e; }
+.tasktitle { margin:0 0 7px; font-size:16px; line-height:1.4; overflow-wrap:anywhere; }
+.overview { color:var(--muted); margin:0 0 16px; font-size:13px; overflow-wrap:anywhere; }
+.facts { display:grid; grid-template-columns:116px minmax(0,1fr); gap:7px 10px;
+  padding:14px 0; border-block:1px solid var(--border); margin:0; font-size:12px; }
+.facts dt { color:var(--muted); }
+.facts dd { margin:0; overflow-wrap:anywhere; }
+.scope { margin:14px 0; font-size:12px; overflow-wrap:anywhere; }
+.scope strong { display:block; font-weight:500; color:var(--muted); margin-bottom:5px; }
+.scope ul { margin:0; padding-left:18px; }
+.tokens { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px;
+  padding-top:14px; }
+.token span { display:block; font-size:10px; color:var(--muted); }
+.token strong { font-size:16px; font-weight:600; }
+.token-source { font-size:11px; color:var(--muted); margin:10px 0 0; overflow-wrap:anywhere; }
+.activity { padding-top:12px; margin-top:12px; border-top:1px solid var(--border);
+  font-size:12px; color:var(--muted); }
+.activity div { overflow-wrap:anywhere; margin-top:3px; }
+.empty { color:var(--muted); border:1px dashed var(--border); padding:24px;
+  border-radius:12px; grid-column:1/-1; }
+footer { margin-top:26px; color:var(--muted); font-size:12px; }
+@media(max-width:650px) { main { padding:20px 16px; } header { align-items:flex-start; }
+  h1 { font-size:23px; } .summary { grid-template-columns:repeat(2,1fr); }
+  .toolbar { align-items:flex-start; } .card { padding:16px; } }
+.team { margin-bottom:24px; }
+.team > summary { cursor:pointer; font-size:15px; font-weight:650; }
+.team p { font-size:12px; color:var(--muted); }
+.team-controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.team-controls label, .team-local { display:grid; gap:6px; font-size:12px; align-items:start; }
+.team-controls fieldset { min-width:0; border:1px solid var(--border); border-radius:10px;
+  margin:0; padding:12px; display:grid; gap:10px; }
+.team-controls legend { padding:0 5px; color:var(--text); }
+.team select, .team input[type=text] { width:100%; border:1px solid var(--border);
+  background:var(--bg); color:var(--text); padding:9px; border-radius:7px; font:inherit; }
+.team textarea { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font:inherit; }
+.team select:disabled, .team input:disabled { opacity:.55; }
+.team .future { margin-top:18px; }
+.team-local { margin-top:12px; }
+.team pre { white-space:pre-wrap; overflow-wrap:anywhere; padding:16px;
+  background:var(--bg); border-radius:8px; font-size:12px; }
+.team button { border:1px solid var(--border); border-radius:8px; background:#21334e;
+  color:var(--text); padding:10px 14px; cursor:pointer; margin-top:12px; }
+.team button:disabled { opacity:.5; cursor:default; }
+@media(max-width:650px) { .team-controls { grid-template-columns:1fr; } }
+.activity-tabs { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:24px; }
+.activity-tabs[hidden] { display:none; }
+.activity-tabs button:disabled { opacity:.45; cursor:default; }
+.activity-tabs button, #history-filter { background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 14px; font:inherit; cursor:pointer; }
+.activity-tabs button[aria-selected=true] { background:#21334e; border-color:var(--blue); }
+.activity-tabs button:focus-visible, #history-filter:focus-visible { outline:2px solid var(--blue); outline-offset:3px; }
+#history-controls { margin:14px 0; }
+.screen { background:#080c12; border:1px solid var(--border); border-radius:10px;
+  padding:14px; height:340px; overflow:auto; font:13px/1.6 ui-monospace,Consolas,monospace; }
+.screen pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 14px; font:inherit; }
+.screen .message { color:var(--text); }
+.screen .activity { border:0; margin:0 0 8px; padding:0; color:var(--muted); }
+.screen:focus-visible { outline:2px solid var(--blue); }
+.live-controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+.live-controls button { padding:7px 10px; background:var(--panel); color:var(--text);
+  border:1px solid var(--border); border-radius:6px; cursor:pointer; }
+.terminal-monitor { min-height:240px; overflow:auto; background:#05070b; border:1px solid #394557; border-radius:8px; }
+.terminal-monitor img { display:block; width:100%; height:auto; }
+.terminal-monitor img[hidden] { display:none; }
+.card:fullscreen { background:var(--bg); padding:24px; overflow:auto; }
+.manager-input { display:flex; gap:8px; margin-top:12px; }
+.manager-input input { width:100%; height:auto; padding:10px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:6px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><h1>Session view</h1><p class="subtitle" id="project">AgentKit · Local runtime</p></div>
+<span class="pill" id="dashboard-access">Read only · Local</span>
+</header>
+<div class="toolbar">
+<span class="muted">Saved local state; no model calls</span>
+<div class="statusline" id="connection" role="status" aria-live="polite">Connecting…</div>
+</div>
+<details class="card" id="workspace-panel">
+<summary>Worktrees and integration</summary>
+<p>Stable task branches and reserved paths survive retries. Unregistered or missing work remains visible for recovery. Approved commits merge into the integration branch after combined checks; conflicts stay held.</p>
+<button id="workspace-refresh" type="button">Refresh inventory</button>
+<p id="workspace-status" role="status"></p>
+<div id="workspace-list" class="grid"></div>
+</details>
+<details class="card team">
+<summary>Team setup preview</summary>
+<p>Choose Claude or Codex independently for each role. Download the preview or apply it
+to an idle project using local operator controls. Neither action starts sessions. Choose medium, high, xhigh or max effort per role; native manager effort is reported and cannot be changed mid-session. Recorded manager metadata stays separate from these choices.</p>
+<p id="team-current-manager">Current external manager: awaiting local snapshot.</p>
+<div id="team-controls" class="team-controls"></div>
+<p id="team-total" role="status"></p>
+<p>Each builder and tester pool has its own worker slots. Actual concurrency depends on provider limits.
+Separate tasks preserve independent testing. Choose human review for lower expected usage,
+or add an independent AI reviewer. One planner also handles management and assignment.
+Separate-task roles automatically use their matching model assignment. Explicit task pins take precedence.</p>
+<label class="future"><input type="checkbox" id="team-future">
+Future-project preview: enable qualified local Qwen workers</label>
+<label class="team-local">Editable local model ID
+<input type="text" id="team-local-model" maxlength="200" disabled></label>
+<p>Qwen is optional, disabled by default, and unavailable for managers or reviewers.
+Future TEST_ONLY task documentation uses complexity: easy. Current Qwen task eligibility is
+RESEARCH only; qualification must establish support before use. This preview creates no tasks.</p>
+<details><summary>Preview YAML</summary><pre id="team-yaml"></pre></details>
+<button type="button" id="team-download">Download configuration preview</button>
+<button type="button" id="team-apply" disabled>Apply to idle project</button>
+<p id="team-apply-status" role="status"></p>
+</details>
+<div class="summary" id="summary"></div>
+<h2 class="section-title">Project token usage</h2>
+<p class="muted">All recorded launches, including retries, failures, builders, testers and CLI control sessions.
+Thinking is included in output. Claude cache reads/writes are included once; Codex cached input is already in input.
+Unreported external-chat usage and unrecorded allowance probes cannot be counted.</p>
+<div class="summary" id="project-usage"></div>
+<p id="usage-coverage" class="muted"></p>
+<details><summary>Usage by provider and role</summary><div class="grid" id="usage-breakdown"></div></details>
+<h2 class="section-title">Live agent screens</h2>
+<p class="muted">Read-only live images of the registered CLI windows, preserving their actual display.
+Only an explicitly registered interactive CLI manager accepts keyboard input with local operator controls.
+Mirroring makes no model calls. This chat stays in VS Code until a verified manager handoff.</p>
+<div class="grid" id="live-screens"></div>
+<h2 class="section-title">Feature previews and user review</h2>
+<p id="review-status" role="status">Reading saved preview state...</p>
+<div class="grid" id="review-jobs"></div>
+<h2 class="section-title">Account allowance</h2>
+<p class="muted">Shared across sessions using the same account. Tokens do not determine the percentage. Saved reports are not live checks.</p>
+<div class="grid" id="allowance"></div>
+<div id="notice" role="status" hidden></div>
+<div class="activity-tabs" role="tablist" aria-label="Session activity">
+<button id="tab-working" role="tab" aria-selected="true" aria-controls="activity-panel">Working</button>
+<button id="tab-waiting" role="tab" aria-selected="false" aria-controls="activity-panel" tabindex="-1">Waiting</button>
+<button id="tab-attention" role="tab" aria-selected="false" aria-controls="activity-panel" tabindex="-1">Needs attention</button>
+<button id="tab-history" role="tab" aria-selected="false" aria-controls="activity-panel" tabindex="-1">History</button>
+</div>
+<section id="activity-panel" role="tabpanel" aria-labelledby="tab-working">
+<p class="muted" id="tab-explanation"></p>
+<div id="history-controls" hidden><label>History filter
+<select id="history-filter"><option value="all">All history</option><option value="done">Completed sessions / done tasks</option>
+<option value="crashed">Failed / crashed</option><option value="stale">Stale registrations / records</option>
+<option value="transferred">Transferred continuations</option><option value="cancelled">Cancelled</option></select></label></div>
+<div id="page-controls" class="activity-tabs" aria-label="Activity pages" hidden>
+<button type="button" id="page-previous">Previous page</button>
+<span id="page-range" role="status" aria-live="polite"></span>
+<button type="button" id="page-next">Next page</button></div>
+<h2 class="section-title" id="sessions-heading">Sessions</h2>
+<div class="grid" id="sessions"></div>
+<h2 class="section-title" id="tasks-heading">Waiting and unassigned tasks</h2>
+<div class="grid" id="tasks"></div>
+</section>
+<details><summary class="section-title">Recovery and wake delivery</summary><div class="grid" id="recovery"></div></details>
+<footer>Refreshes every 2.5 seconds from saved local state. Counters are recorded session totals;
+“unknown” means unavailable. Claude reported input excludes cache read and cache write tokens.
+Codex input includes cached tokens. Thinking is included in Claude output and must not be added again.
+Agent turns are provider-reported loop steps; missing counts stay unknown. Live screens mirror registered
+CLI windows. Worker screens are read-only; manager input requires verified registration. Total coverage is shown explicitly.</footer>
+</main>
+<script src="/dashboard_review.js"></script>
+<script src="/dashboard_team.js"></script>
+<script src="/dashboard_allowance.js"></script>
+<script src="/dashboard_categories.js"></script>
+<script src="/dashboard_recovery.js"></script>
+<script src="/dashboard_activity.js"></script>
+<script src="/dashboard_view.js"></script>
+<script src="/dashboard_workspaces.js"></script>
+</body>
+</html>

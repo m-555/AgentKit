@@ -1,0 +1,21 @@
+# AgentKit role profile for Codex. Use with: codex exec -p agentkit-implementer
+#
+# Codex has no pre-write hook, so its boundary is the sandbox plus the worktree
+# it is given with --cd. The MCP server supplies the same task state Claude sees,
+# and `audit_diff` re-checks ownership before the merge gate.
+
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[mcp_servers.agentkit]
+command = "agentkit-mcp"
+args = []
+env_vars = ["AGENTKIT_ROOT", "AGENTKIT_TASK", "AGENTKIT_GENERATION", "AGENTKIT_PROCESS", "AGENTKIT_ROLE", "AGENTKIT_JOB"]
+
+# These are baseline examples. AgentKit launches apply explicit role/assignment
+# pins instead of silently choosing this example model. Verify actual sandbox
+# behavior with a functional probe. State-changing MCP tools may require explicit
+# per-tool approval in the host; never autoapprove the entire server or label
+# mutating tools read-only to make a blocked session appear functional.
