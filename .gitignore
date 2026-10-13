@@ -52,3 +52,7 @@ Thumbs.db
 *.log
 .vscode/
 .codex/
+
+# Internal notes kept beside the public copy; never published
+docs/handoffs/
+docs/reviews/AGENTKIT_AUDIT_*.md
