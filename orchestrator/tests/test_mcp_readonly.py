@@ -23,9 +23,10 @@ READ_CALLS = {
     "source_read": {"path": "services/retry.py", "where": "project"},
     "source_search": {"text": "VALUE", "where": "project"},
     "source_diff": {"task_id": 1},
+    "job_attachment": {"job_id": "read-check", "name": "r1-1.png"},
 }
 DATABASE_CALLS = {name: args for name, args in READ_CALLS.items()
-                  if name not in ("gate_list", "hotspot_report")}
+                  if name not in ("gate_list", "hotspot_report", "job_attachment")}  # a screenshot is a file
 
 
 @pytest.fixture
@@ -33,7 +34,10 @@ def reader_state(project_root, conn, monkeypatch):
     monkeypatch.setenv("AGENTKIT_ROOT", str(project_root))
     for name in ("AGENTKIT_PROCESS", "AGENTKIT_ROLE", "AGENTKIT_TASK"):
         monkeypatch.delenv(name, raising=False)
-    jobs.create(project_root, "read-check", "Inspect existing state", "codex")
+    jobs.create(project_root, "read-check", "Inspect existing state", "codex", attachments=["r1-1.png"])
+    from agentkit.job_input import folder
+    folder(project_root, "read-check").mkdir(parents=True)
+    (folder(project_root, "read-check") / "r1-1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(16))
     head = repo.head_commit(project_root)
     task = db.create_task(conn, title="read-only scope", job_id="read-check",
                           status="RUNNING", branch="main", base_sha=head,
@@ -59,9 +63,10 @@ def database_snapshot(root, conn):
 def test_annotated_reads_preserve_database_bytes_schema_and_meta(reader_state, name):
     root, conn = reader_state
     before = database_snapshot(root, conn)
-    function = getattr(mcp_workspaces if name == "workspaces" else mcp_extra if name.startswith("source_") else mcp_server, name)
+    function = getattr(mcp_workspaces if name == "workspaces" else mcp_extra if name.startswith(("source_", "job_attachment"))
+                       else mcp_server, name)
     result = function(**READ_CALLS[name])
-    assert isinstance(result, str) and result
+    assert (result.data.startswith(b"\x89PNG") if name == "job_attachment" else isinstance(result, str) and result)
     assert database_snapshot(root, conn) == before
 
 

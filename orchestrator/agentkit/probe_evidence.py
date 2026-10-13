@@ -36,6 +36,32 @@ def guard_denial(output: str, capability: str, target: str) -> bool:
     return False
 
 
+_OPENCODE_FILE_TOOLS = frozenset({"edit", "write", "patch", "multiedit"})
+_OPENCODE_RULE = "rule which prevents you from using this specific tool call"
+
+
+def opencode_denial(output: str, target: str) -> bool:
+    """OpenCode's permission engine refused a file tool aimed at exactly this path (F22)."""
+    wanted = _normalize_display(target)
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        part = event.get("part") if isinstance(event, dict) and event.get("type") == "tool_use" else None
+        if not isinstance(part, dict) or part.get("tool") not in _OPENCODE_FILE_TOOLS:
+            continue
+        state = part.get("state")
+        if not isinstance(state, dict):
+            continue
+        given = state.get("input") or {}
+        path = given.get("filePath") or given.get("path") if isinstance(given, dict) else None
+        if (state.get("status") == "error" and isinstance(path, str) and _normalize_display(path) == wanted
+                and _OPENCODE_RULE in str(state.get("error", "")).lower()):
+            return True
+    return False
+
+
 def _normalize_display(value: str, *, casefold: bool = True) -> str:
     normalized = re.sub(r"/+", "/", value.replace("\\", "/"))
     return normalized.lower() if casefold else normalized
@@ -83,8 +109,17 @@ def _write_attempt(command: str, target: str, *, allow_relative: bool = True) ->
 
 def _mentions_target(text: str, target: str, fold: bool) -> bool:
     normalized = _normalize_display(text, casefold=fold)
-    return re.search(r"(?<![A-Za-z0-9_/.-])" + re.escape(target)
-                     + r"(?=$|[\s'\":])", normalized) is not None
+    if re.search(r"(?<![A-Za-z0-9_/.-])" + re.escape(target)
+                 + r"(?=$|[\s'\":])", normalized) is not None:
+        return True
+    # PowerShell wraps long quoted paths in native error records. Newlines cannot
+    # be Windows path characters; unwrap only a quoted span, then compare exactly.
+    # Unquoted reports, other paths and prefixes remain inconclusive.
+    if fold:
+        for match in re.finditer(r"(['\"])([^'\"]+)\1", normalized):
+            if match.group(2).replace("\r", "").replace("\n", "") == target:
+                return True
+    return False
 
 
 def sandbox_denial(output: str, target: str) -> bool:

@@ -42,20 +42,26 @@ from .config import ProjectConfig, load_project
 WORKER_PROMPT = (
     "The host prepares task inputs, output directories and dependencies before launch. "
     "Never install packages, discover runtimes or repair setup. If a preparation problem "
-    "appears, report BLOCKED and stop; host code or the manager handles it. "
-    "First obtain agentkit brief for task {task_id}. If ToolSearch exists, call it with "
-    "query select:mcp__agentkit__brief, then call brief. If discovery or brief fails, "
+    "appears, or a tool or permission you need is denied, call task_status BLOCKED with "
+    "infrastructure=true and the exact error, then stop: the operator fixes it. "
+    "First obtain agentkit brief for task {task_id}. In Codex call tools.mcp__agentkit__brief "
+    "directly; never list ALL_TOOLS. If ToolSearch exists, call it once with "
+    "query select:mcp__agentkit__brief,mcp__agentkit__commit_and_gate,mcp__agentkit__checkpoint,"
+    "mcp__agentkit__task_status, then call brief. If discovery or brief fails, "
     "stop and report the blocker; never browse .ai/tasks.yaml, project.yaml or job history "
-    "to infer your assignment. Read only required inputs and existing owned output files. "
-    "Missing owned outputs are deliverables to create, not preparation errors. "
-    "For Codex on Windows use one literal read per shell call: Get-Content -LiteralPath PATH. "
-    "Never combine reads using semicolons, pipelines, expansions or scripts; the guard rejects them. "
-    "For Claude use Read. Skills are already included below; do not reread their files. "
-    "Follow the brief exactly. Commit via AgentKit task_commit BEFORE gate_run. "
-    "Run every check ONLY via AgentKit gate_run, never a direct npm/pytest/build shell command. "
-    "Stay inside the owned_paths it gives you; edits outside them are blocked and "
+    "to infer your assignment. Read only required inputs and existing owned output files, "
+    "requesting all of them in one turn rather than one read per turn: several plain reads may "
+    "share one shell command (Get-Content -LiteralPath a; Get-Content -LiteralPath b), or pass "
+    "paths to source_read. Pipelines, redirection and expansions are refused. For Claude use "
+    "parallel Read calls. Missing owned outputs are deliverables to create, not preparation errors. "
+    "Skills are already included below; do not reread their files. "
+    "Follow the brief exactly; it is short by design, and brief with full=true adds lower-priority "
+    "context only if you need it. When your files are complete, call AgentKit commit_and_gate: "
+    "it commits through the host and runs your declared gate in one call (task_commit then "
+    "gate_run also works). Run every check ONLY via AgentKit, never a direct npm/pytest/build "
+    "shell command. Stay inside the owned_paths it gives you; edits outside them are blocked and "
     "audited. If you need a path you do not own, call `lease_request` rather than "
-    "working around the block. Run `gate_run` before you stop, then `checkpoint`, "
+    "working around the block. Run the gate before you stop, then `checkpoint`, "
     "then set status REVIEW with the gate output as evidence."
 )
 
@@ -151,9 +157,17 @@ def unavailable_adapters(conn: sqlite3.Connection) -> dict[str, str]:
     for state in providers.list_states(conn):
         if state.status == providers.AVAILABLE or state.available_at():
             continue
+        if state.status == providers.HELD:
+            out[state.provider] = f"held by the user ({state.reason})"
+            continue
         minutes = max(1, state.seconds_remaining() // 60)
         out[state.provider] = f"in {state.status.lower()} for ~{minutes} min ({state.reason})"
     return out
+
+
+def _dependencies_met(conn: sqlite3.Connection, task: dict[str, Any], done: set[str]) -> bool:
+    missing = {str(dep) for dep in task["depends_on"]} - done
+    return not missing or db.held_for(conn, task, missing)  # a coupled tester's held source (F38)
 
 
 def eligible_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -162,7 +176,7 @@ def eligible_tasks(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     done = {str(t["id"]) for t in db.list_tasks(conn, (sm.DONE,))}
     done.update(str(t["spec_id"]) for t in db.list_tasks(conn, (sm.DONE,)) if t.get("spec_id"))
     return sorted((t for t in ready if t["kind"] != "OPERATOR" and t["id"] not in active
-                   and {str(dep) for dep in t["depends_on"]}.issubset(done)),
+                   and _dependencies_met(conn, t, done)),
                   key=lambda t: (int(t["priority"] if t.get("priority") is not None else 100), int(t["id"])))
 
 
@@ -322,6 +336,10 @@ def launch(
             return False, "configured worker role slots are occupied"
     from .run_limits import limits
     limits(project)  # Refuse invalid caps before claiming a generation or lease.
+    from .recovery_runtime import launch_blocker
+    waiting = launch_blocker(conn, task_id)  # F26: no claim or preparation while a limit is unconfirmed
+    if waiting:
+        return False, waiting
     try:
         prompt = instructions.prompt(task, project, WORKER_PROMPT.format(task_id=task_id))
         workflow.validate_launch_context(conn, project, task, prompt, paths, launch_plan.worktree)
@@ -417,7 +435,7 @@ def launch(
     db.update_task(
         conn, task_id, owned_paths=paths, adapter=launch_plan.adapter_name,
         worktree=str(worktree), base_sha=base,
-        branch=repo.current_branch(worktree), blocker=None,
+        branch=repo.current_branch(worktree), blocker=None, **launch_failure.cleared(conn, task_id),
         model=selected.model,
         session_token=workflow.resume_token(project, task, task.get("adapter") == launch_plan.adapter_name and task.get("model") == selected.model),
     )

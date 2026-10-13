@@ -8,7 +8,8 @@ establish what runs. Read only the guide needed for the current task.
 
 | Topic | Guide |
 |---|---|
-| Human or AI review, one planner/manager | [Review workflows](review-workflows.md) |
+| Review every task, once per job, tests only or yourself | [Review workflows](review-workflows.md) |
+| Jobs, screenshots, problems and replies from your phone | [When something stops](problems-and-phone.md) |
 | Small fresh builders and separate testers | [Efficient workflow](efficient-workflow.md) |
 | Bundled skills and project-specific instructions | [Skills and project guidance](skills-and-project-guidance.md) |
 | Provider/model choices, handoffs and quota recovery | [Recovery and model policy](recovery-and-model-policy.md) |
@@ -28,6 +29,8 @@ establish what runs. Read only the guide needed for the current task.
 - [Plan v3](plans/PLAN_V3.md): historical architecture and invariants.
 - [Plan v2](plans/PLAN.md) and [original plan](plans/multi_agent_codex_claude_plan.md): earlier proposals.
 - [Sandbox review](reviews/SANDBOX_REVIEW.md): preserved historical findings.
+- [Efficiency findings and plan (2026-10-12)](evaluations/AGENTKIT_EFFICIENCY_AUDIT_2026-10-12.md): measured token overhead, professional framework practices, and proposed fixes.
+- [AgentKit benchmark (2026-10-12)](evaluations/AGENTKIT_BENCHMARK_2026-10-12.md): solo versus managed Sol and Qwen/Sol; final token tables, role costs, recovery evidence, and limitations.
 - [Qwen evaluation](evaluations/QWEN_EVALUATION.md): dated, bounded model qualification.
 - [Glossary](GLOSSARY.md): introductory vocabulary; older model examples are historical.
 

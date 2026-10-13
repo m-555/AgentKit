@@ -44,6 +44,7 @@ class _State:
     active_turn: str | None = None
     claude: dict = field(default_factory=dict)
     codex: dict = field(default_factory=dict)
+    opencode: dict = field(default_factory=dict)
     result: dict | None = None
     agent_turns: int | None = None
 
@@ -119,6 +120,10 @@ def _merge(state: _State, rows: dict, key: str, values: dict) -> None:
 
 def _event(state: _State, event: dict) -> None:
     kind = event.get("type")
+    if kind in ("step_start", "step_finish"):
+        from .opencode_usage import consume
+        consume(state, event, _merge)
+        return
     if kind in ("turn.started", "thread.started"):
         state.terminal = False
         if kind == "turn.started":
@@ -234,8 +239,10 @@ def _summary(state: _State) -> dict:
     if state.provider == "claude" and state.result is not None:
         values, source = state.result.copy(), "claude_result"
     else:
-        rows = state.codex if state.provider == "codex" else state.claude
-        source = "codex_turns" if state.provider == "codex" else "claude_messages"
+        rows = (state.opencode if state.provider == "opencode" else
+                state.codex if state.provider == "codex" else state.claude)
+        source = ("opencode_steps" if state.provider == "opencode" else
+                  "codex_turns" if state.provider == "codex" else "claude_messages")
         values = {
             name: (sum(row[name] for row in rows.values())
                    if rows and all(row[name] is not None for row in rows.values()) else None)

@@ -50,7 +50,7 @@ def run(args, root) -> int:
             print(json.dumps({"job": job_id, "holder": args.holder, "credential_file": str(path)}))
             return 0
         if action == "status":
-            data = manager.packet(conn, job_id)
+            data = manager.packet(conn, job_id, full=getattr(args, "full", False))
             record = manager.lease(conn, job_id)
             data["lease"] = {k: v for k, v in (record or {}).items() if k != "token_hash"}
         elif action == "audit":
@@ -64,6 +64,25 @@ def run(args, root) -> int:
                    Path(args.evidence_file).read_text(encoding="utf-8"))
             data = {"job": job_id, "task": args.task, "reviewed_head": args.head,
                     "verdict": args.verdict}
+        elif action == "local-trial":
+            from .local_trial import grant
+            if not token:
+                raise PermissionError("external manager is not attached")
+            value = grant(conn, job_id, args.task, token, Path(args.evidence_file).read_text(encoding="utf-8"))
+            data = {"job": job_id, "task": args.task, "local_trial": value}
+        elif action == "integration-retry":
+            from .integration_retry import authorize
+            from .manager import require_lease
+            if not token:
+                raise PermissionError("external manager is not attached")
+            require_lease(conn, job_id, token)
+            task = db.get_task(conn, args.task)
+            if not task or task.get("job_id") != job_id:
+                raise PermissionError("the task belongs to another job")
+            message = authorize(conn, load_project(root), args.task,
+                                Path(args.evidence_file).read_text(encoding="utf-8"),
+                                after_tasks=args.after_task or None, coupled=args.coupled)
+            data = {"job": job_id, "task": args.task, "result": message}
         elif action == "ack":
             manager_audit.acknowledge(conn, root, job_id, args.epoch, args.digest, Path(args.evidence_file).read_text(encoding="utf-8"), token=token)
             data = {"job": job_id, "acknowledged_epoch": args.epoch}
@@ -89,7 +108,7 @@ def configure(sub, handler) -> None:
     parser = sub.add_parser("manager", help="external manager bridge and recovery audit")
     commands = parser.add_subparsers(dest="manager_command", required=True)
     for name in ("attach", "heartbeat", "checkpoint", "release", "status", "audit", "ack", "review", "repin",
-                 "handover"):
+                 "handover", "local-trial", "integration-retry"):
         command = commands.add_parser(name)
         command.add_argument("job")
         command.set_defaults(func=handler)
@@ -107,12 +126,26 @@ def configure(sub, handler) -> None:
             command.add_argument("--ttl", type=int, default=90)
         elif name == "checkpoint":
             command.add_argument("--file", required=True)
+        elif name == "status":
+            command.add_argument("--full", action="store_true",
+                                 help="print bulky recovery fields such as the audit report in full")
         elif name == "ack":
             command.add_argument("--epoch", type=int, required=True)
             command.add_argument("--digest", required=True)
             command.add_argument("--evidence-file", required=True)
+        elif name == "local-trial":
+            command.add_argument("--task", type=int, required=True,
+                                 help="the HOTSPOT task the user approved for a local, tool-confined worker")
+            command.add_argument("--evidence-file", required=True, help="the user's decision, in their words")
+        elif name == "integration-retry":
+            command.add_argument("--task", type=int, required=True, help="the approved task whose combined gate failed")
+            command.add_argument("--after-task", type=int, action="append", default=[],
+                                 help="tester task to integrate first (repeatable)")
+            command.add_argument("--coupled", action="store_true",
+                                 help="the testers depend on this task and start from its approved commit (F38)")
+            command.add_argument("--evidence-file", required=True, help="why the retry or hold is safe")
         elif name == "review":
             command.add_argument("--task", type=int, required=True)
             command.add_argument("--head", required=True)
-            command.add_argument("--verdict", choices=("PASS", "CHANGES", "REJECT"), required=True)
+            command.add_argument("--verdict", choices=("PASS", "CHANGES", "REJECT", "BLOCKED"), required=True)
             command.add_argument("--evidence-file", required=True)

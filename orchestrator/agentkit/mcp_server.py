@@ -40,6 +40,7 @@ from . import (
 )
 from .config import load_project
 from .context import active_task_id
+from .mcp_errors import surface_refusals
 from .mcp_extra import READ_ONLY
 from .paths import find_project_root, resolve_within
 
@@ -51,6 +52,7 @@ mcp = _Server(
         "a file you are not certain you own. Never edit .ai/tasks.db directly."
     ),
 )
+surface_refusals(mcp)  # F20: MCP 2.x otherwise hides every refusal's reason
 
 
 def _root() -> Path:
@@ -84,7 +86,7 @@ def _mutating_task(task_id: int | None) -> int:
     `_needs_task` instead, so a stale worker can still ask what happened to it.
     """
     resolved = _needs_task(task_id)
-    if os.environ.get("AGENTKIT_ROLE") in ("review", "coordinator"):
+    if os.environ.get("AGENTKIT_ROLE") in ("review", "coordinator", "final_review"):
         raise PermissionError("control sessions cannot report progress as an implementer")
     root = _root()
     conn = db.connect(root)
@@ -103,10 +105,11 @@ def _dump(data: Any) -> str:
 
 
 @mcp.tool(annotations=READ_ONLY)
-def brief(task_id: int | None = None) -> str:
+def brief(task_id: int | None = None, full: bool = False) -> str:
     """Get everything needed to start or resume a task: goal, scope, gates, last checkpoint.
 
-    Call this first in any worker session, before reading code.
+    Call this first in any worker session, before reading code. It is short by default;
+    full=true adds the lower-priority sections it names as left out.
     """
     root = _root()
     assigned = os.environ.get("AGENTKIT_TASK", "").strip()
@@ -120,7 +123,7 @@ def brief(task_id: int | None = None) -> str:
         data = briefs.build(conn, load_project(root), resolved)
         if data is None:
             return f"Task {resolved} does not exist. Use task_list to see what does."
-        return briefs.render(data)
+        return briefs.render(data, budget=None if full else briefs.BUDGET)
     finally:
         conn.close()
 
@@ -334,8 +337,12 @@ def checkpoint(
 
 
 @mcp.tool()
-def task_status(status: str, evidence: str = "", task_id: int | None = None) -> str:
+def task_status(status: str, evidence: str = "", task_id: int | None = None,
+                infrastructure: bool = False) -> str:
     """Move a task to a new state. REVIEW and DONE require evidence (gate output).
+
+    BLOCKED with infrastructure=True: a tool, permission or setup failure you cannot fix
+    stops this task for the user instead of asking for a replan; the rest of the job continues.
 
     An agent may set: RUNNING, VERIFYING, REVIEW, BLOCKED, FAILED. It may not
     requeue itself, replan itself, or declare its own work integration-ready â€”
@@ -366,9 +373,16 @@ def task_status(status: str, evidence: str = "", task_id: int | None = None) -> 
                 return "Refused: commit changes and pass the task gate at the current HEAD first."
             if not audit.audit_worktree(conn, load_project(root), work, resolved, record=False).clean:
                 return "Refused: task has out-of-scope changes."
+            from .infra_stop import resubmitted
+            if resubmitted(conn, resolved, head):
+                return "Stopped: review already rejected this exact commit; the operator decides what follows."
             if task["status"] == sm.RUNNING:
                 db.set_status(conn, resolved, sm.VERIFYING, actor="agent", cause="gate evidence recorded")
 
+        if upper == "BLOCKED" and infrastructure:
+            from .infra_stop import stop
+            stop(conn, resolved, "worker", evidence, actor="agent")
+            return "Stopped: the job waits for the operator to fix this and retry. Stop now."
         try:
             db.set_status(conn, resolved, upper, actor="agent", evidence=evidence)
         except sm.TransitionError as exc:
@@ -402,13 +416,10 @@ def gate_run(level: str | None = None, task_id: int | None = None) -> str:
                 raise ValueError("task not found")
             if not task:
                 raise ValueError("unknown task")
-            if os.environ.get("AGENTKIT_ROLE") == "review":
-                processes.require_control(conn, purposes=("review",), task_id=resolved)
-            else:
-                worker.require_current(conn, resolved)
-            from .workflow import validate_gate
+            from .mcp_gate_checks import require_gate_owner, validate_requested_gate
+            require_gate_owner(conn, resolved)
             level = level if level is not None else task["gate_level"]
-            validate_gate(project, task, level)
+            validate_requested_gate(project, task, level, _require_planner)
             work = task.get("worktree") or work
         finally:
             conn.close()
@@ -419,7 +430,7 @@ def gate_run(level: str | None = None, task_id: int | None = None) -> str:
     if resolved is not None:
         conn = db.connect(root)
         try:
-            worker.require_current(conn, resolved)
+            require_gate_owner(conn, resolved)
             db.log_event(conn, resolved, "gate_run",
                          cause=f"level={level}",
                          effect="passed" if result.passed else "failed",
@@ -486,18 +497,8 @@ def _require_planner(job_id=None):
     if active_task_id() is not None:
         raise PermissionError("workers propose graph_amend; only the coordinator edits the plan")
     if job_id:
-        from . import manager
-        from .mcp_manager import credential
-        root = _root()
-        conn = db.connect(root)
-        try:
-            if manager.blocks_spawn(conn, job_id):
-                token = credential(root, job_id)
-                if not token:
-                    raise PermissionError("external manager lease owns this job")
-                return manager.require_lease(conn, job_id, token)
-        finally:
-            conn.close()
+        from .manager import planner_authority
+        return planner_authority(_root(), job_id)
     return None  # Interactive operator/coordinator connection.
 
 
@@ -521,7 +522,12 @@ def project_configure(gates: dict[str, list[str]], worktree_setup: list[str],
     import yaml
 
     from .locking import atomic_write, exclusive
+    from .workflow import enabled
     root = _root()
+    current = load_project(root)
+    if enabled(current) and current.gate("full"):
+        raise PermissionError("project settings belong to the user (the view's Settings tab or .ai/project.yaml); "
+                              "plan within the configured gates, contracts and hot paths")
     conn = db.connect(root)
     try:
         if any(p["purpose"] != "coordinator" for p in processes.active(conn)):
@@ -590,7 +596,8 @@ def task_diff(task_id: int, offset: int = 0, limit: int = 60000) -> str:
 @mcp.tool()
 def task_define(definition: dict[str, Any]) -> str:
     """Create or revise a task using the tasks.yaml schema, including job_id and skills."""
-    task = spec.TaskSpec.from_dict(definition)
+    from .workflow import default_gate
+    task = spec.TaskSpec.from_dict(default_gate(load_project(_root()), definition))
     if os.environ.get("AGENTKIT_PROCESS") and not task.job_id:
         raise ValueError("supervised planning requires a job_id")
     _require_planner(task.job_id)
@@ -659,15 +666,17 @@ def job_block(job_id: str, question: str) -> str:
 
 
 @mcp.tool()
-def integration_retry(task_id: int, evidence: str, after_tasks: list[int] | None = None) -> str:
-    """Planner retries failed combined checks on unchanged approved source, without a model."""
+def integration_retry(task_id: int, evidence: str, after_tasks: list[int] | None = None,
+                      coupled: bool = False) -> str:
+    """Planner retries failed combined checks on unchanged approved source, without a model.
+    coupled: the after_tasks testers depend on this source and start from its approved commit."""
     root = _root()
     conn = db.connect(root)
     try:
         task = db.get_task(conn, task_id)
         _require_planner(task.get("job_id") if task else None)
         from .integration_retry import authorize
-        return authorize(conn, load_project(root), task_id, evidence, after_tasks=after_tasks)
+        return authorize(conn, load_project(root), task_id, evidence, after_tasks=after_tasks, coupled=coupled)
     finally:
         conn.close()
 
@@ -681,18 +690,8 @@ def task_requeue(task_id: int, instructions: str) -> str:
         if task is None:
             raise ValueError("task not found")
         _require_planner(task.get("job_id"))
-        if any(p["task_id"] == task_id for p in processes.owning(conn)):
-            raise ValueError("previous session still owns this task; prove monitor and child stopped")
-        from . import recovery_runtime
-        held_ready = task["status"] == "READY" and recovery_runtime.pending(conn, task_id=task_id)
-        if task["status"] not in ("FAILED", "STALE", "NEEDS_REPLAN", "BLOCKED") and not held_ready:
-            raise ValueError("task does not need recovery")
-        if not instructions.strip() or len(instructions) > 2000:
-            raise ValueError("retry needs 1-2000 characters of planner instructions")
-        recovery_runtime.supersede_worker_intents(conn, task_id, instructions)
-        db.bump_generation(conn, task_id)
-        db.update_task(conn, task_id, next_action=instructions, blocker=None, blocked_meta=None, attempts=0)
-        db.set_status(conn, task_id, "READY", actor="scheduler", cause="coordinator authorized recovery")
+        from .requeue import requeue
+        requeue(conn, _root(), task_id, instructions)
         return "Task requeued with preserved work."
     finally:
         conn.close()
@@ -721,7 +720,10 @@ def amendment_resolve(amendment_id: int, decision: str) -> str:
 
 @mcp.tool()
 def review_submit(task_id: int, head_sha: str, verdict: str, evidence: str) -> str:
-    """Independent review of the exact commit assigned by the supervisor."""
+    """Independent review of the exact commit assigned by the supervisor.
+
+    verdict: PASS, CHANGES or REJECT for the code; BLOCKED when a tool, permission or setup
+    failure kept you from reviewing (the task waits for the user; nobody redoes the work)."""
     root = _root()
     conn = db.connect(root)
     try:
@@ -730,9 +732,12 @@ def review_submit(task_id: int, head_sha: str, verdict: str, evidence: str) -> s
         from .review_policy import mode
         if mode(project) == "human":
             raise PermissionError("human mode uses mechanical staging and operator feature acceptance, not AI review_submit")
+        if mode(project) in ("once", "off"):
+            raise PermissionError(f"review is {mode(project)}: tasks are approved by their gate, not review_submit")
         if enabled(project):
-            if os.environ.get("AGENTKIT_PROCESS"):
-                raise PermissionError("external-manager review requires the attached native manager session")
+            if os.environ.get("AGENTKIT_PROCESS"):  # F24: a coordinator may stand in for an absent manager
+                from .external_review import submit_as_standin
+                return submit_as_standin(conn, project, task_id, head_sha, verdict, evidence)
             submit(conn, project, task_id, head_sha, verdict, evidence)
             return "External manager review recorded."
         process = processes.require_control(conn, purposes=("review", "coordinator"), task_id=task_id)
@@ -761,6 +766,9 @@ _register_manager(mcp)
 from .mcp_workspaces import register as _register_workspaces  # noqa: E402
 
 _register_workspaces(mcp)
+from .mcp_worker import register as _register_worker  # noqa: E402
+
+_register_worker(mcp)  # last: a worker session keeps only its own tools
 
 
 def main() -> int:

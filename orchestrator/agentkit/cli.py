@@ -66,6 +66,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not (root / ".git").exists():
         sys.stderr.write(f"warning: {root} is not a git repository; worktrees will not work.\n")
     result = init_project.init(root, force=args.force)
+    from .project_registry import register
+    register(root)
     print(f"AgentKit initialised in {root}")
     print(f"  stacks detected: {', '.join(result['stacks']) or 'none'}")
     for rel in result["created"]:
@@ -583,7 +585,7 @@ def cmd_models(args: argparse.Namespace) -> int:
             print(json.dumps(entries, indent=2))
         else:
             print(f"Model catalog verified: {models.VERIFIED_AT}; approved upgrades apply to new sessions.")
-            print("Coordinator/reviewer: Astra -> Opus, xhigh; coordinator stays pinned after starting.")
+            print("Coordinator/reviewer: Sol -> Opus, high; coordinator stays pinned after starting.")
             print("Worker preference: Sol -> Opus -> Sonnet (easy only); Qwen by explicit easy research assignment.")
             for entry in entries:
                 state = "eligible" if entry["eligible_now"] else "disabled/unavailable"
@@ -626,6 +628,8 @@ def build_parser() -> argparse.ArgumentParser:
     configure_recovery(sub, cmd_recovery)
     from .cli_workflow import configure as configure_workflow
     configure_workflow(sub, _root_or_exit)
+    from .cli_service import configure as configure_service
+    configure_service(sub, _root_or_exit)
     live_parser = sub.add_parser("live", help="read-only live worker, reviewer and manager dashboard")
     live_parser.add_argument("--task", type=int)
     live_parser.add_argument("--follow", action="store_true")
@@ -641,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job")
     p.add_argument("--request-file", required=True)
     p.add_argument("--coordinator", choices=["auto", "codex", "claude-code", "claude"], default="auto",
-                   help="auto selects Astra then Opus xhigh before pinning the job")
+                   help="auto selects Sol then Opus high before pinning the job")
     p.add_argument("--reviewer", action="append", choices=adapters.selectable_names())
     p.set_defaults(func=cmd_job)
     p = js.add_parser("update")
@@ -657,7 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", help="record an operator's commit-specific review")
     p.add_argument("task", type=int)
     p.add_argument("--head", required=True)
-    p.add_argument("--verdict", required=True, choices=("PASS", "CHANGES", "REJECT"))
+    p.add_argument("--verdict", required=True, choices=("PASS", "CHANGES", "REJECT", "BLOCKED"))
     p.add_argument("--evidence-file", required=True)
     p.set_defaults(func=cmd_review)
 
@@ -739,6 +743,8 @@ def build_parser() -> argparse.ArgumentParser:
     q = pr_sub.add_parser("check", help="refresh account availability (Claude may use a small tool-free request)")
     q.add_argument("provider", nargs="?", choices=adapters.selectable_names())
     q.set_defaults(func=cmd_providers)
+    from .cli_hold import configure as configure_hold  # the user's stop; only `clear` lifts it
+    configure_hold(pr_sub, _root_or_exit)
 
     p = sub.add_parser("integrate", help="merge INTEGRATION_READY tasks behind the full gate")
     p.add_argument("--limit", type=int, default=10)
@@ -806,6 +812,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task", type=int)
     p.add_argument("--reason", help="recorded in the event log")
     p.set_defaults(func=cmd_task_cancel)
+    from .cli_infra import configure as configure_retry
+    from .cli_infra import configure_problems
+    configure_retry(task_sub, _root_or_exit)
+    configure_problems(sub, _root_or_exit)
 
     from .cli_workspaces import configure as configure_workspaces
     configure_workspaces(sub)

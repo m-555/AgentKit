@@ -42,6 +42,10 @@ ACTIVE = (READY, LEASED, RUNNING, VERIFYING, REVIEW, INTEGRATION_READY, INTEGRAT
 #: resume. Scheduling still uses ACTIVE â€” a BLOCKED task is not runnable.
 HOLDS_CLAIMS = (*ACTIVE, BLOCKED)
 
+#: States whose declared owned paths are claims, for lease grants and edit checks alike (F37):
+#: a stopped task waiting for recovery or replanning still owns its preserved work.
+OWNS_PATHS = (*HOLDS_CLAIMS, STALE, NEEDS_REPLAN, FAILED)
+
 #: States in which a worker may be running and holding a worktree.
 OCCUPIES_WORKTREE = (LEASED, RUNNING, VERIFYING, REVIEW, INTEGRATION_READY, INTEGRATING, STALE)
 
@@ -56,10 +60,11 @@ TRANSITIONS: dict[str, tuple[str, ...]] = {
     LEASED: (RUNNING, READY, STALE, FAILED, NEEDS_REPLAN, CANCELLED),
     RUNNING: (VERIFYING, BLOCKED, READY, STALE, FAILED, NEEDS_REPLAN, CANCELLED),
     VERIFYING: (REVIEW, FAILED, RUNNING, READY, NEEDS_REPLAN, BLOCKED),
-    REVIEW: (INTEGRATION_READY, FAILED, NEEDS_REPLAN, RUNNING),
+    # BLOCKED: a review that could not be done stops for the operator (infra_stop).
+    REVIEW: (INTEGRATION_READY, FAILED, NEEDS_REPLAN, RUNNING, BLOCKED),
     INTEGRATION_READY: (INTEGRATING, FAILED, NEEDS_REPLAN),
     INTEGRATING: (DONE, FAILED),
-    BLOCKED: (READY, RUNNING, VERIFYING, NEEDS_REPLAN, CANCELLED),
+    BLOCKED: (READY, RUNNING, VERIFYING, NEEDS_REPLAN, CANCELLED, REVIEW),
     FAILED: (READY, VERIFYING, INTEGRATION_READY, NEEDS_REPLAN, CANCELLED),
     STALE: (RUNNING, READY, VERIFYING, NEEDS_REPLAN, CANCELLED),
     NEEDS_REPLAN: (PLANNED, READY, CANCELLED),
@@ -71,7 +76,7 @@ TRANSITIONS: dict[str, tuple[str, ...]] = {
 ACTOR_PERMISSIONS: dict[str, frozenset[str]] = {
     "scheduler": frozenset(STATES),
     "integrator": frozenset({INTEGRATION_READY, INTEGRATING, DONE, FAILED, REVIEW}),
-    "reviewer": frozenset({INTEGRATION_READY, FAILED}),
+    "reviewer": frozenset({INTEGRATION_READY, FAILED, BLOCKED}),
     # An agent may report progress and problems, but may never requeue itself,
     # replan itself, or declare its own work integration-ready.
     "agent": frozenset({RUNNING, VERIFYING, REVIEW, BLOCKED, FAILED}),
@@ -103,6 +108,11 @@ def validate(current: str, requested: str, actor: str = "scheduler") -> None:
         return
     if current in (FAILED, BLOCKED, STALE) and requested == VERIFYING and actor not in ("human", "scheduler"):
         raise TransitionError(current, requested, "only the host may recover preserved failed work")
+    if current == BLOCKED and requested == REVIEW and actor not in ("human", "scheduler"):
+        raise TransitionError(current, requested, "only the operator may resume a stopped review")
+    if current == REVIEW and requested == BLOCKED and actor not in ("reviewer", "human"):
+        # Only the review itself may stop a commit in review; a late worker report never undoes it.
+        raise TransitionError(current, requested, "only a reviewer may stop a review")
     allowed = TRANSITIONS.get(current, ())
     if requested not in allowed:
         raise TransitionError(current, requested, "not reachable from the current state")

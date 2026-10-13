@@ -30,6 +30,9 @@ AVAILABLE = "AVAILABLE"
 COOLDOWN = "COOLDOWN"
 DEGRADED = "DEGRADED"
 AUTH_REQUIRED = "AUTH_REQUIRED"
+#: The user stopped this provider (for example: no tokens left). No automatic check or
+#: provider event lifts it, and it is not a manager outage; only the user releases it.
+HELD = "HELD"
 
 #: Used when the provider tells us nothing about when it will be back.
 UNKNOWN_RESET_BACKOFF = (900, 1800, 3600)        # 15 min, 30 min, 1 h
@@ -59,7 +62,7 @@ class ProviderState:
         return self.status == AVAILABLE
 
     def due(self, now: datetime | None = None) -> bool:
-        if self.status == AUTH_REQUIRED:
+        if self.status in (AUTH_REQUIRED, HELD):
             return False
         retry = db.parse_ts(self.retry_at)
         return retry is None or retry <= (now or datetime.now(UTC))
@@ -74,6 +77,8 @@ class ProviderState:
     def describe(self) -> str:
         if self.status == AVAILABLE:
             return f"{self.provider} AVAILABLE"
+        if self.status == HELD:
+            return f"{self.provider} HELD until the user releases it"
         when = db.parse_ts(self.retry_at)
         stamp = when.astimezone().strftime("%H:%M") if when else "unknown"
         return f"{self.provider} {self.status} {'retry' if self.status == DEGRADED else 'resets'} {stamp}"
@@ -232,6 +237,8 @@ def begin_cooldown(
     (15m → 30m → 1h) rather than polling a wall we already know is there.
     """
     previous = get_state(conn, provider, account)
+    if previous.status == HELD:
+        return previous  # the user's hold outlasts any cooldown
     now = datetime.now(UTC)
     if unmetered(provider):
         # Local health/capacity uses seconds of backoff, not subscription clocks.
@@ -277,6 +284,16 @@ def begin_cooldown(
     return state
 
 
+def hold(conn: sqlite3.Connection, provider: str, *, reason: str, account: str = "default") -> ProviderState:
+    """The user stops a provider until they release it (`clear`); nothing lifts it automatically."""
+    state = ProviderState(provider=provider, account=account, status=HELD, reason=reason,
+                          detected_at=datetime.now(UTC).isoformat(timespec="seconds"), consecutive=0)
+    _write(conn, state)
+    db.log_event(conn, None, "provider_held", cause=f"{provider} ({account}): {reason}",
+                 effect="no new launches on this provider until the user releases it")
+    return state
+
+
 def clear_cooldown(
     conn: sqlite3.Connection, provider: str, account: str = "default", *, reason: str = "recovered"
 ) -> ProviderState:
@@ -316,7 +333,7 @@ def observe(conn, provider: str, snapshot: dict, *, account="default", now=None)
     from . import manager_state
     with db.immediate_transaction(conn):
         previous = get_state(conn, provider, account)
-        if previous.status != AVAILABLE:
+        if previous.status not in (AVAILABLE, HELD):
             manager_state.capture_provider(conn, provider, previous.reason)
         return _observe(conn, provider, snapshot, account=account, now=now)
 
@@ -336,6 +353,9 @@ def _observe(conn, provider: str, snapshot: dict, *, account="default", now=None
                      (key, window.get("bucket", provider), window["window"], window.get("used_percent"), reset, moment.isoformat(), snapshot.get("reason", "provider event")))
     blocking = [dict(r) for r in conn.execute("SELECT * FROM quota_windows WHERE account_key=? AND used_percent>=100", (key,))
                 if not r["resets_at"] or (db.parse_ts(r["resets_at"]) or moment) > moment]
+    held = get_state(conn, provider, account)
+    if held.status == HELD:
+        return held  # evidence is recorded, but only the user lifts a hold
     if snapshot.get("available") is True and not blocking:
         return clear_cooldown(conn, provider, account, reason="availability confirmed by provider")
     resets = [db.parse_ts(w["resets_at"]) for w in blocking if w["resets_at"]]
@@ -353,7 +373,7 @@ def next_retry(conn: sqlite3.Connection, now: datetime | None = None) -> int | N
     """Seconds until the soonest cooldown ends, or None if nothing is cooling."""
     moment = now or datetime.now(UTC)
     waits = [
-        s.seconds_remaining(moment) for s in list_states(conn) if s.status != AVAILABLE
+        s.seconds_remaining(moment) for s in list_states(conn) if s.status not in (AVAILABLE, HELD)
     ]
     return min(waits) if waits else None
 
@@ -364,11 +384,12 @@ def _write(conn: sqlite3.Connection, state: ProviderState) -> None:
     from . import manager_state
     with nullcontext(conn) if conn.in_transaction else db.immediate_transaction(conn):
         previous = get_state(conn, state.provider, state.account)
-        if previous.status != AVAILABLE:
+        # A hold is the user's decision, not an outage: placing or releasing it opens no epoch.
+        if previous.status not in (AVAILABLE, HELD):
             manager_state.capture_provider(conn, state.provider, previous.reason)
         _persist_state(conn, state)
-        if state.status != AVAILABLE:
-            manager_state.capture_provider(conn, state.provider, state.reason, new=previous.status == AVAILABLE)
+        if state.status not in (AVAILABLE, HELD):
+            manager_state.capture_provider(conn, state.provider, state.reason, new=previous.status in (AVAILABLE, HELD))
 
 
 def _persist_state(conn, state: ProviderState) -> None:

@@ -50,13 +50,24 @@ CREATE TABLE IF NOT EXISTS manager_checkpoints (
  id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, holder TEXT NOT NULL, epoch INTEGER NOT NULL,
  payload TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS problems (
+ id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, task_id INTEGER, kind TEXT NOT NULL,
+ signature TEXT NOT NULL, code TEXT NOT NULL UNIQUE, title TEXT NOT NULL, detail TEXT NOT NULL,
+ options TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN', wait_revision INTEGER,
+ created_at TEXT NOT NULL, notified_at TEXT, resolved_at TEXT, resolution TEXT
+);
+CREATE INDEX IF NOT EXISTS problems_signature ON problems(signature);
+CREATE TABLE IF NOT EXISTS job_reviews (
+ id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, head_sha TEXT NOT NULL, verdict TEXT NOT NULL,
+ reviewer TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL
+);
 """
 
 #: Columns added to tables owned by `db.py`. Requested values come from the launch;
 #: observed values only from provider events, so the two are never conflated.
 _COLUMNS = {
     "manager_state": {"outage_head": "TEXT", "outage_integration_head": "TEXT", "authorized_signatures": "TEXT"},
-    "tasks": {"model_assignment": "TEXT", "blocked_meta": "TEXT"},
+    "tasks": {"model_assignment": "TEXT", "blocked_meta": "TEXT", "local_trial": "TEXT"},
     "processes": {"pid_identity": "TEXT", "child_pid_identity": "TEXT","requested_model": "TEXT", "requested_effort": "TEXT", "requested_profile": "TEXT",
                   "observed_model": "TEXT", "observed_effort": "TEXT", "model_verified": "INTEGER", "child_launch_state": "TEXT"},
 }

@@ -81,13 +81,23 @@ def _shell(command: str, authorize, allowlist: list[str], commit_check=None,
         return shellguard.ShellVerdict(True, "exact project command", "allowlisted")
     if "<" in command:
         return shellguard.ShellVerdict(False, "Shell input redirection is not supported", "opaque_write")
-    if any(char in command for char in ";|&$`\n\r()") or (os.name == "nt" and any(char in command for char in "%!")):
+    if any(char in command for char in "|&$`\n\r()") or (os.name == "nt" and any(char in command for char in "%!")):
         return shellguard.ShellVerdict(False, "Compound or expanding shell command cannot be proven safe", "opaque_write")
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=">")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";>")
     lexer.whitespace_split, lexer.commenters = True, ""
     if os.name == "nt":
         lexer.escape = ""  # Backslashes are path separators in PowerShell/cmd.
-    tokens = list(lexer)
+    segments: list[list[str]] = [[]]
+    for token in lexer:
+        if token == ";":
+            segments.append([])
+        elif set(token) == {";"}:
+            return shellguard.ShellVerdict(False, "Empty shell command in a sequence", "opaque_write")
+        else:
+            segments[-1].append(token)
+    if len(segments) > 1:
+        return _read_batch(segments)
+    tokens = segments[0]
     writes = []
     arguments = []
     index = 0
@@ -176,6 +186,16 @@ def _shell(command: str, authorize, allowlist: list[str], commit_check=None,
     if commit:
         return commit_check()
     return shellguard.ShellVerdict(True, "simple command writes only leased paths", "ok", writes=writes)
+
+
+def _read_batch(segments: list[list[str]]) -> shellguard.ShellVerdict:
+    """Several plain reads joined by ';' run in one turn; any write, Git or empty part is refused."""
+    for tokens in segments:
+        if not tokens or any(">" in token for token in tokens) or tokens[0].lower() not in READ_COMMANDS or any(
+                value.startswith(("--pre", "--hostname-bin")) for value in tokens[1:]):
+            return shellguard.ShellVerdict(False, "Only plain read commands may share one command line",
+                                           "opaque_write")
+    return shellguard.ShellVerdict(True, "several read-only commands", "ok")
 
 
 def handle(payload: dict) -> int:

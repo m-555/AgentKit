@@ -74,11 +74,24 @@ agentkit manager release JOB
 The credential is saved under `.ai/runtime/manager-JOB.credential` and is not printed.
 Checkpoint fields are `decisions`, `completed`, `remaining`, `tests`, `next_action`
 and `blockers`; `next_action` is required. Save useful decisions and failures rather
-than raw transcripts. A live or unidentified old bridge still fences a replacement,
-even after release. Exit the released bridge before allowing a CLI replacement.
-A paused native chat with a live bridge cannot safely be assumed dead from a missing
-heartbeat. An expired live holder can authenticate renewal and must complete its
-recovery audit. Preserve `.ai/tasks.db` and runtime evidence across restarts.
+than raw transcripts. A fresh external lease fences coordinator spawning. After
+expiry or release, a surviving editor bridge alone does not prove manager activity;
+the supervisor may start the job's pinned CLI coordinator. A returning external
+manager waits while that coordinator owns the job, then renews or hands over the
+lease and completes recovery. Preserve `.ai/tasks.db` and runtime evidence.
+
+Process ownership uses operating-system birth identity rather than a PID alone.
+Windows birth ticks remain comparable when probes switch between native calls and
+CIM; only CIM rounding permits a bounded sub-microsecond tolerance. Linux identity
+includes the boot identifier. Unreadable identity remains conservative: do not
+terminate a process simply because an old task recorded its PID.
+
+Managers can request an additional declared check with
+`gate_run(task_id=TASK_ID, level="full")`. AgentKit verifies planner authority for
+the task's job, runs in that task's checkout, and records the observed commit and
+cleanliness. Workers and reviewers retain their assigned-gate restrictions. These
+receipts do not approve or merge changes; exact review and recovery guards still
+apply. Reload a connected MCP server after changing its core implementation.
 
 ## Runtime setup and readable source
 
@@ -245,3 +258,16 @@ an enabled registration exists. Runtime native-recovery-health.json reports its
 identity and cadence independently of the development supervisor. The native
 VS Code bridge remains private and cannot be called proven until a real quota
 reset yields an observed completed continuation turn.
+
+## Local provider usage evidence
+
+OpenCode step-finish events expose explicit input, output, reasoning and cache
+counters. The usage reader sums uniquely identified steps, keeps omitted counters
+unknown, and reports zero only when the provider records zero. Tool-call steps
+are not terminal completion; a new step clears the terminal flag. No reasoning
+or answer text is used to estimate tokens. Counters describe observed requests,
+not the configured context window or a benchmark of first-token latency.
+
+A parser revision refreshes older receipts even when the event fingerprint is
+unchanged. Receipts whose source logs have been retired remain readable. Existing
+Claude and Codex counter semantics and the receipt format are preserved.

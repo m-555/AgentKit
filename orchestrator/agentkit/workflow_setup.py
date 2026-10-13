@@ -31,8 +31,8 @@ def apply(root, profile, *, replan_unstarted=None):
     workflow = profile.get("workflow")
     if not isinstance(workflow, dict) or set(workflow) - {"mode", "review", "worker_slots"}:
         raise ValueError("profile workflow supports mode, review and worker_slots only")
-    if workflow.get("mode") != "separate-tasks" or workflow.get("review") not in ("human", "ai"):
-        raise ValueError("choose separate-tasks and human or ai review")
+    if workflow.get("mode") not in ("feature", "separate-tasks") or workflow.get("review") not in review_policy.MODES:
+        raise ValueError("choose feature or separate-tasks, and ai, once, off or human review")
     maximum = profile.get("max_workers", 0)
     if type(maximum) is not int or maximum < 0:
         raise ValueError("max_workers must be zero (unlimited) or positive")

@@ -15,6 +15,8 @@ from .mcp_extra import READ_ONLY
 
 def task_commit(message: str) -> str:
     """Commit audited task files on the host. Message: 1-2000 chars. Applies optional source_line_endings."""
+    from .commit_message import without_attribution
+    message = without_attribution(message)  # the user is the only author
     if not isinstance(message, str) or not message.strip() or len(message) > 2000 or "\0" in message:
         raise ValueError("Commit message must contain 1-2000 characters")
     root = Path(os.environ["AGENTKIT_ROOT"])
@@ -40,8 +42,9 @@ def task_commit(message: str) -> str:
             from .commit_format import normalize
             head_before = repo.head_commit(work)
             normalize(project, work, changed, lambda: worker.require_current(conn, task_id))
-            before = gates.run_gate(project, "fast", cwd=work)
-            if not before.passed:
+            # A quick check before committing when the project declares one; the task gate runs after.
+            before = gates.run_gate(project, "fast", cwd=work) if project.gate("fast") else None
+            if before is not None and not before.passed:
                 raise ValueError(before.summary())
             current = worker.require_current(conn, task_id).task
             if (current["status"] != "RUNNING" or current.get("branch") != task["branch"]

@@ -46,6 +46,15 @@ planner may use `integration_retry` for this specific stale-version failure or a
 repaired combined-check failure; code reruns full integration checks without
 launching another worker. A real contract change still requires replanning.
 
+When an approved source change fails the combined gate only because strict tests
+pin the old behavior, and the tester that updates them depends on that source,
+the planner holds the source with `integration_retry(..., after_tasks=[tester],
+coupled=True)` (or `agentkit manager integration-retry --coupled`). The tester
+starts from the source's approved commit, both land through one combined gate,
+and the source then completes as already contained, without another worker. A
+branch whose base is not in integration merges only on that footing, and only
+while the held source is unchanged and still approved.
+
 Accepted integration does not automatically publish, push or merge into protected
 `main`/`master`. Project delivery remains a separate human decision under AgentKit's
 existing protected-branch rule. Completed branches remain available. Completed worktrees remain by default;

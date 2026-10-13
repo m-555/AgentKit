@@ -50,11 +50,10 @@ def test_live_external_manager_fences_autonomous_coordinator(project_root, conn,
         manager.heartbeat(conn, external["id"], "wrong-token")
 
 
-def test_released_or_expired_lease_requires_confirmed_bridge_death(project_root, conn, external):
+def test_a_released_lease_hands_over_once_even_while_the_bridge_lives(project_root, conn, external):
+    # F29: a live bridge process is no proof of a manager (a chat at a usage limit keeps it).
     token = manager.attach(conn, project_root, external["id"], "native", os.getpid())
     manager.release(conn, external["id"], token)
-    assert manager.blocks_spawn(conn, external["id"])
-    conn.execute("UPDATE manager_leases SET pid=? WHERE job_id=?", (dead_pid(), external["id"]))
     assert not manager.blocks_spawn(conn, external["id"])
     assert manager_state.pending(conn, external["id"])
     assert manager_state.state(conn, external["id"])["epoch"] == 1
@@ -66,8 +65,9 @@ def test_expired_live_holder_can_renew_but_must_audit(project_root, conn, extern
     token = manager.attach(conn, project_root, external["id"], "native", os.getpid())
     past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     conn.execute("UPDATE manager_leases SET heartbeat_at=? WHERE job_id=?", (past, external["id"]))
-    assert manager.blocks_spawn(conn, external["id"])
+    assert not manager.blocks_spawn(conn, external["id"])  # the coordinator may take over
     manager.heartbeat(conn, external["id"], token)
+    assert manager.blocks_spawn(conn, external["id"])
     assert manager.fresh(manager.lease(conn, external["id"])) and manager_state.pending(conn, external["id"])
     report = manager_audit.run(conn, project_root, external["id"], token=token)
     manager_audit.acknowledge(conn, project_root, external["id"], report["epoch"], report["digest"], "Inspected durable memory after heartbeat loss", token=token)

@@ -523,6 +523,13 @@ def _is_externally_blocked(task: dict[str, Any]) -> bool:
     return bool(isinstance(meta, dict) and meta.get("reason"))
 
 
+def held_for(conn: sqlite3.Connection, task: dict[str, Any], missing: set[str]) -> bool:
+    """A coupled tester may start while its only unmet dependency is held for it (F38)."""
+    from .integration_remediation import held_source
+    held = held_source(conn, task)
+    return held is not None and missing <= {str(held[0]["id"]), str(held[0].get("spec_id"))}
+
+
 def refresh_ready(conn: sqlite3.Connection) -> list[int]:
     """Promote PLANNED tasks; BLOCKED needs explicit recovery authorization."""
     done_specs = {
@@ -539,7 +546,7 @@ def refresh_ready(conn: sqlite3.Connection) -> list[int]:
         if _is_externally_blocked(task):
             continue
         deps = {str(d) for d in task["depends_on"]}
-        if deps.issubset(satisfied):
+        if deps.issubset(satisfied) or held_for(conn, task, deps - satisfied):
             try:
                 set_status(conn, int(task["id"]), sm.READY,
                            cause="all dependencies DONE")
@@ -698,10 +705,12 @@ def _conflicts_in_tx(
                 })
                 break
 
-    # Tasks that are live and scoped but have not yet taken an explicit lease.
+    # Tasks that own paths without a live lease: scoped work not yet leased, and stopped work
+    # awaiting recovery or replanning. The same set the edit-time check enforces (F37).
+    owners = ", ".join("?" for _ in sm.OWNS_PATHS)
     task_rows = conn.execute(
-        f"SELECT * FROM tasks WHERE status IN ({marks}) AND id != ?",
-        (*sm.HOLDS_CLAIMS, task_id),
+        f"SELECT * FROM tasks WHERE status IN ({owners}) AND id != ?",
+        (*sm.OWNS_PATHS, task_id),
     ).fetchall()
     already = {(c["task_id"], c["held"]) for c in found}
     for row in task_rows:

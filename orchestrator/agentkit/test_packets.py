@@ -67,7 +67,8 @@ def build(conn, project, task):
         ).fetchone()
         head = review["head_sha"] if review and review["verdict"] == "PASS" else None
         gate = db.cached_gate(conn, builder["id"], builder["gate_level"], head) if head else None
-        ready = builder["status"] == "DONE" and bool(gate and gate["passed"])
+        ready = (builder["status"] == "DONE" or _held_at(conn, task, builder, head)) and bool(
+            gate and gate["passed"])
         result.append({
             "task_id": builder["id"], "spec_id": builder["spec_id"],
             "state": "ready" if ready else "waiting",
@@ -77,6 +78,13 @@ def build(conn, project, task):
             "gate": builder["gate_level"], "gate_passed": ready,
         })
     return result
+
+
+def _held_at(conn, task, builder, head):
+    """The builder's approved commit is held for this coupled tester (F38)."""
+    from .integration_remediation import held_source
+    held = held_source(conn, task)
+    return bool(head) and held is not None and held[0]["id"] == builder["id"] and held[1] == head
 
 
 def verify_checkout(conn, project, task, worktree):

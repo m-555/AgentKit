@@ -23,14 +23,15 @@ def load(root: str | Path, job_id: str) -> dict:
 
 
 def create(root: str | Path, job_id: str, request: str, coordinator: str = "auto",
-           *, acceptance: list[str] | None = None, reviewers: list[str] | None = None) -> dict:
+           *, acceptance: list[str] | None = None, reviewers: list[str] | None = None,
+           attachments: list[str] | None = None) -> dict:
     from . import adapters
     coordinator = adapters.canonical_name(coordinator)
     reviewers = [adapters.canonical_name(name) for name in reviewers] if reviewers else ["codex", "claude-code"]
     if any(adapters.get(name) is None for name in reviewers):
         raise ValueError("unknown reviewer adapter")
     if coordinator not in ("auto", "codex", "claude-code") or any(name not in ("codex", "claude-code") for name in reviewers):
-        raise ValueError("control roles require Astra/Codex or Opus/Claude")
+        raise ValueError("control roles require Codex or Claude")
     if not request.strip():
         raise ValueError("a request and an installed adapter name are required")
     with exclusive(root, "jobs"):
@@ -40,7 +41,7 @@ def create(root: str | Path, job_id: str, request: str, coordinator: str = "auto
         from .config import load_project
         from .review_policy import mode
         data = {"workflow_review": mode(load_project(root)), "id": job_id, "coordinator": coordinator, "coordinator_selection": coordinator, "revision": 1,
-                "requests": [{"text": request, "at": db.utcnow()}],
+                "requests": [{"text": request, "at": db.utcnow(), **({"attachments": attachments} if attachments else {})}],
                 "acceptance": acceptance or [], "decisions": [],
                 "reviewers": reviewers or [coordinator], "plan": ""}
         atomic_write(target, json.dumps(data, indent=2) + "\n")
@@ -57,15 +58,20 @@ def sync(root: str | Path, job: dict) -> None:
         conn.close()
 
 
-def amend(root: str | Path, job_id: str, text: str, *, user: bool = False) -> dict:
+def amend(root: str | Path, job_id: str, text: str, *, user: bool = False,
+          attachments: list[str] | None = None) -> dict:
     if not text.strip():
         raise ValueError("empty job update")
     with exclusive(root, "jobs"):
         job = load(root, job_id)
         key = "requests" if user else "decisions"
-        job[key].append({"text": text, "at": db.utcnow()})
+        job[key].append({"text": text, "at": db.utcnow(), **({"attachments": attachments} if attachments else {})})
         if user:
             job["revision"] += 1
+            # Refused before saving: an oversized update would stop every managed worker launch.
+            from .config import load_project
+            from .workflow import check_intent
+            check_intent(load_project(root), job)
         atomic_write(path(root, job_id), json.dumps(job, indent=2) + "\n")
         sync(root, job)
         if user:

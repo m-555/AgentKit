@@ -7,6 +7,8 @@ from pathlib import Path
 from .locking import atomic_write
 from .session_usage import scan_details
 
+PARSER_VERSION = 2  # OpenCode step counters are supported from this revision.
+
 FIELDS = ("input_tokens", "output_tokens", "thinking_tokens",
           "cached_input_tokens", "cache_write_input_tokens")
 
@@ -51,12 +53,13 @@ def capture(root: Path, identifier: int) -> bool:
         source = path_for(root, identifier, "events.jsonl")
         before = fingerprint(source)
         previous = read(root, identifier)
-        if previous and previous.get("fingerprint") == before:
+        if (previous and previous.get("fingerprint") == before
+                and previous.get("parser_version") == PARSER_VERSION):
             return False
         usage = scan_details(root, identifier)
         if before != fingerprint(source):
             return False  # An active writer changed the source; retry after it stops.
-        receipt = {"version": 1, "process_id": identifier,
+        receipt = {"version": 1, "parser_version": PARSER_VERSION, "process_id": identifier,
                    "fingerprint": before, "usage": usage}
         atomic_write(path_for(root, identifier, "usage.json"), json.dumps(receipt) + "\n")
         return True

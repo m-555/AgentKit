@@ -1,6 +1,6 @@
 """Explicit model assignments: exact pins and approved fallbacks only.
 
-Without an explicit policy AgentKit keeps its ranked defaults (Astra/Opus for
+Without an explicit policy AgentKit keeps its ranked defaults (Sol/Opus for
 control, Sol then Opus for workers). An explicit entry changes the contract:
 
 * the named profile, model and effort are used exactly, with no catalog upgrade
@@ -35,15 +35,16 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from . import db
-from .models import HIGH_RISK, PROFILES, Profile, enabled, profile
+from .local_trial import granted
+from .models import PROFILES, QWEN_KINDS, Profile, enabled, profile
 
 TRIGGERS = ("USAGE_LIMIT", "RATE_LIMIT", "PROVIDER_OUTAGE", "AUTH_ERROR", "MODEL_UNAVAILABLE", "CRASH")
 DEFAULT_TRIGGERS = ("USAGE_LIMIT",)
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-CONTROL_PROFILES = ("astra", "sol", "opus")
+CONTROL_PROFILES = ("sol", "opus")
 CONTROL_EFFORTS = ("medium", "high", "xhigh", "max")
 WORKER_PROFILES = ("sol", "opus", "sonnet", "qwen")
-_ENTRY_KEYS = {"profile", "model", "effort", "fallback"}
+_ENTRY_KEYS = {"profile", "model", "effort", "fallback", "roles"}
 _FALLBACK_KEYS = {"profile", "model", "effort", "when"}
 
 
@@ -58,6 +59,9 @@ class Assignment:
     name: str
     primary: Profile
     fallbacks: tuple[Fallback, ...] = ()
+    #: Task roles this assignment may serve; empty means any. The user limited the local
+    #: Qwen builder to backend-builder work (2026-10-10).
+    roles: tuple[str, ...] = ()
 
     def candidates(self, trigger: str | set[str] | None = None) -> list[Profile]:
         active = {trigger} if isinstance(trigger, str) else set(trigger or ())
@@ -68,7 +72,8 @@ class Assignment:
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "primary": self.primary.to_dict(),
-                "fallback": [{**f.profile.to_dict(), "when": list(f.when)} for f in self.fallbacks]}
+                "fallback": [{**f.profile.to_dict(), "when": list(f.when)} for f in self.fallbacks],
+                **({"roles": list(self.roles)} if self.roles else {})}
 
 
 def _settings(project) -> dict[str, Any]:
@@ -131,9 +136,13 @@ def _fallbacks(project, data: Any, where: str, primary: Profile, *, control: boo
 
 
 def _assignment(project, data: Any, name: str, where: str, *, control: bool = False) -> Assignment:
-    primary = _entry(project, data, where, control=control)
+    entry = {key: value for key, value in data.items() if key != "roles"} if isinstance(data, dict) else data
+    primary = _entry(project, entry, where, control=control)
     fallbacks = _fallbacks(project, data.get("fallback"), where, primary, control=control)
-    return Assignment(name, primary, fallbacks)
+    roles = data.get("roles") or ()
+    if not isinstance(roles, (list, tuple)) or not all(isinstance(r, str) and r.strip() for r in roles):
+        raise ValueError(f"{where}.roles must be a list of task role names")
+    return Assignment(name, primary, fallbacks, tuple(roles))
 
 
 def role(project, name: str) -> Assignment | None:
@@ -196,12 +205,17 @@ def for_task(project, task: dict[str, Any]) -> Assignment | None:
             return None
     result = named(project, value) if isinstance(value, str) else _assignment(
         project, value, "task", f"task {task.get('spec_id') or task.get('id')} model_assignment")
+    if result.roles and task.get("role") not in result.roles:
+        raise ValueError(f"{result.name} serves only {', '.join(result.roles)} tasks, "
+                         f"not {task.get('role') or 'a task without a role'}")
     for selected in (result.primary, *[f.profile for f in result.fallbacks]):
-        if selected.name in ("sonnet", "qwen") and (
-                task.get("complexity", "standard") != "easy" or task.get("kind") in HIGH_RISK):
-            raise ValueError(f"{selected.name} in {result.name} requires an easy task without a high-risk kind")
-        if selected.name == "qwen" and task.get("kind") != "RESEARCH":
-            raise ValueError("qwen assignments are limited to RESEARCH tasks")
+        from .models import small_model_fits
+        if not small_model_fits(selected.name, task):
+            raise ValueError(f"{selected.name} in {result.name} needs a task without a high-risk kind"
+                             + (" and an easy task" if selected.name == "sonnet" else ""))
+        if selected.name == "qwen" and task.get("kind") not in QWEN_KINDS and not granted(task):
+            raise ValueError("qwen assignments are limited to RESEARCH and bounded SAFE_PARALLEL, "
+                             "DEPENDENT or TEST_ONLY tasks")
     return result
 
 
@@ -236,7 +250,7 @@ def control_allowed(project, role_name: str, selected: Profile, pinned: dict | N
     """Whether `selected` may run a control role. Fails closed.
 
     Precedence: a job's persisted coordinator pin, then the explicit role entry,
-    then the configured Astra/Opus defaults (high). A later policy edit can neither
+    then the configured Sol/Opus defaults (high). A later policy edit can neither
     switch nor invalidate an existing pin, and an explicit entry never falls
     through to the legacy list.
     """
@@ -327,7 +341,7 @@ def describe(project) -> dict[str, Any]:
     roles = {}
     for name in ("coordinator", "reviewer"):
         explicit = role(project, name)
-        roles[name] = explicit.to_dict() if explicit else "default (Astra, then Opus, high)"
+        roles[name] = explicit.to_dict() if explicit else "default (Sol, then Opus, high)"
     return {"roles": roles,
             "assignments": {n: named(project, n).to_dict() for n in (settings.get("assignments") or {})},
             "default_assignment": settings.get("default_assignment")}

@@ -20,6 +20,17 @@ def identify(install) -> dict[str, str]:
     return {"path": os.path.normcase(str(path)), "source": install.source, "sha256": digest.hexdigest(), "enforcement": enforcement_digest(install.name)}
 
 
+def same_runtime(left: dict, right: dict) -> bool:
+    """PATH and editor discovery are provenance, not a different local binary."""
+    if left == right:
+        return True
+    local_sources = {"path", "extension"}
+    if left.get("source") not in local_sources or right.get("source") not in local_sources:
+        return False
+    return {k: v for k, v in left.items() if k != "source"} == {
+        k: v for k, v in right.items() if k != "source"}
+
+
 LEGACY_NAMES = ("hooks_cli.py", "hook_worktree_paths.py", "codex_hooks.py", "patch_paths.py",
                 "leases.py", "shellguard.py", "adapters/codex.py", "codex_trust.py",
                 "adapters/claude_code.py", "adapters/wsl_claude.py", "wsl_host.py",

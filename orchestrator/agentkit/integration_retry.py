@@ -22,7 +22,7 @@ def _retryable(conn, project, task_id):
     return task
 
 
-def authorize(conn, project, task_id, evidence, after_tasks=None):
+def authorize(conn, project, task_id, evidence, after_tasks=None, coupled=False):
     if not evidence.strip() or len(evidence) > 2000:
         raise ValueError("retry needs 1-2000 characters of remediation evidence")
     with exclusive(project.root, "integration"):
@@ -46,8 +46,9 @@ def authorize(conn, project, task_id, evidence, after_tasks=None):
                 raise ValueError("approval changed while its retry was being verified; inspect it again")
             if after_tasks:
                 from .integration_remediation import hold
-                hold(conn, current, after_tasks, head, evidence)
-                return "Approved commit held for tester remediation; no model or merge launched."
+                hold(conn, current, after_tasks, head, evidence, coupled)
+                return ("Approved commit held; coupled testers start from it (F38); " if coupled else
+                        "Approved commit held for tester remediation; ") + "no model or merge launched."
             db.set_status(conn, task_id, "INTEGRATION_READY", actor="integrator", cause=evidence)
             db.update_task(conn, task_id, blocker=None, blocked_meta=None)
             db.log_event(conn, task_id, "integration_retry_authorized", cause=evidence,

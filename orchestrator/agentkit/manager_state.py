@@ -79,7 +79,8 @@ def capture_provider(conn, provider: str, reason: str, *, new=False) -> None:
 def capture_current(conn) -> None:
     from . import providers
     for account in providers.list_states(conn):
-        if account.status != providers.AVAILABLE:
+        # A user's hold is a decision, not an outage: it opens no recovery epoch.
+        if account.status not in (providers.AVAILABLE, providers.HELD):
             capture_provider(conn, account.provider, account.reason)
 
 

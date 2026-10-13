@@ -13,15 +13,24 @@ DEFAULTS = {
 }
 
 
+#: A feature builder implements and tests a whole feature in one session.
+FEATURE_DEFAULTS = {
+    "max_turns": 48,
+    "max_tool_calls": 96,
+    "max_runtime_seconds": 2700,
+    "max_output_tokens": 60000,
+}
+
+
 def limits(project) -> dict[str, int]:
     if project is None:
         return {}
-    from .workflow import enabled
+    from .workflow import enabled, feature
 
     declared = getattr(project, "raw", {}).get("execution_limits", {})
     if not isinstance(declared, dict):
         raise ValueError("execution_limits must be a mapping")
-    result = dict(DEFAULTS) if enabled(project) else {}
+    result = dict(FEATURE_DEFAULTS if feature(project) else DEFAULTS) if enabled(project) else {}
     for name, value in declared.items():
         if name not in DEFAULTS or type(value) is not int or value < 1:
             raise ValueError(

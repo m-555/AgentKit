@@ -8,7 +8,9 @@ object satisfying `AgentAdapter` and core never asks which one it got.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,6 +19,43 @@ from typing import IO, Any
 from .. import errors as _errors
 from ..capabilities import CapabilitySet
 from .base import AgentEvent, BaseAdapter, GuardReport, Installation, Launch
+
+#: Where Git for Windows puts Git Bash when it is installed in its default folder.
+_DEFAULT_GIT_BASH = ("C:/Program Files/Git/bin/bash.exe", "C:/Program Files (x86)/Git/bin/bash.exe")
+_PLAIN_PATH = re.compile(r"[A-Za-z0-9_./:+-]+")
+
+
+def _git_bash() -> str | None:
+    """The Git Bash Claude Code runs hooks in on Windows, found the way Claude Code finds it."""
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    git = shutil.which("git")
+    candidates = [configured] if configured else []
+    if git:
+        candidates.append(str(Path(git).parent.parent / "bin" / "bash.exe"))  # Git\cmd\git.exe -> Git\bin
+    candidates += _DEFAULT_GIT_BASH
+    return next((path for path in candidates if path and Path(path).is_file()), None)
+
+
+def hook_command(executable: str, arguments: str) -> str:
+    """A hook command that keeps its exit status in the shell Claude Code runs it in.
+
+    On Windows, Claude Code runs hooks in Git Bash when it finds it and in PowerShell
+    otherwise. PowerShell cannot run a quoted path without `&`, and it reports exit 1
+    for a hook that exited 2 (block) unless the command ends with `exit $LASTEXITCODE`.
+    A path without spaces or shell characters needs no quotes, and that form works in
+    both shells: in bash the unset variable expands to nothing, so `exit` keeps the
+    hook's own status.
+    """
+    path = executable.replace("\\", "/")
+    if os.name != "nt":
+        return f'"{path}" {arguments}'
+    if any(value in path for value in ('"', "$", "`", "%", "\n", "\r")):
+        raise ValueError("Python executable cannot be safely quoted in a hook command")
+    if _PLAIN_PATH.fullmatch(path):
+        return f"{path} {arguments}; exit $LASTEXITCODE"
+    if _git_bash():
+        return f'"{path}" {arguments}'
+    return f'& "{path}" {arguments}; exit $LASTEXITCODE'
 
 
 class ClaudeCodeAdapter(BaseAdapter):
@@ -126,7 +165,7 @@ class ClaudeCodeAdapter(BaseAdapter):
         *, prompt: str, resume_token: str | None = None,
     ) -> Launch:
         from .. import workflow
-        resume_token = workflow.resume_token(project, {"session_token": resume_token}, True)
+        resume_token = workflow.resume_token(project, {"session_token": resume_token}, True, role=role)
         install = self.detect()
         argv: list[str] = [install.path if install else "claude", "-p"]
 
@@ -151,6 +190,10 @@ class ClaudeCodeAdapter(BaseAdapter):
             "--output-format", "stream-json",
             "--include-hook-events",
             "--verbose",
+            # Skills arrive in the prompt; the per-worktree system prompt sections move to the
+            # first message so every session shares one cached prefix.
+            "--disable-slash-commands",
+            "--exclude-dynamic-system-prompt-sections",
         ]
         argv += ["--strict-mcp-config", "--mcp-config", json.dumps({"mcpServers": {"agentkit": {
             "command": sys.executable, "args": ["-m", "agentkit.mcp_server"]}}})]
@@ -191,15 +234,14 @@ class ClaudeCodeAdapter(BaseAdapter):
         settings_dir.mkdir(parents=True, exist_ok=True)
         target = settings_dir / "settings.local.json"
 
-        executable = '"' + sys.executable.replace("\\", "/") + '"'
         hook_cmd: dict[str, Any] = {
             "type": "command",
-            "command": executable + " -m agentkit.hooks_cli pre-tool-use",
+            "command": hook_command(sys.executable, "-m agentkit.hooks_cli pre-tool-use"),
             "timeout": 20,
         }
         audit_cmd = {
             "type": "command",
-            "command": executable + " -m agentkit.hooks_cli post-tool-use",
+            "command": hook_command(sys.executable, "-m agentkit.hooks_cli post-tool-use"),
             "timeout": 30,
             "async": True,
         }
@@ -239,7 +281,8 @@ class ClaudeCodeAdapter(BaseAdapter):
             hooks[event] = retained
         hooks.setdefault("PreToolUse", []).extend([
             {"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [hook_cmd]},
-            {"matcher": "Bash|PowerShell", "hooks": [{**hook_cmd, "command": executable + " -m agentkit.hooks_cli pre-bash"}]},
+            {"matcher": "Bash|PowerShell", "hooks": [{**hook_cmd, "command": hook_command(
+                sys.executable, "-m agentkit.hooks_cli pre-bash")}]},
         ])
         hooks.setdefault("PostToolUse", []).extend([
             {"matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell", "hooks": [audit_cmd]},

@@ -63,3 +63,37 @@ def test_decision_receipt_does_not_repeat_the_entire_job(state):
     receipt = json.loads(mcp_server.job_decision('one', 'Choose the narrow next task'))
     assert receipt == {'id': 'one', 'revision': 1, 'decision_count': 2}
     assert jobs.load(root, 'one')['decisions'][-1]['text'] == 'Choose the narrow next task'
+
+def test_compact_read_delivers_model_and_review_authority_without_history(state):
+    import yaml
+
+    from agentkit import models, policy
+    from agentkit.config import load_project
+
+    root, conn = state
+    config = root / '.ai/project.yaml'
+    settings = yaml.safe_load(config.read_text(encoding='utf-8'))
+    settings['model_policy'] = {
+        'profiles': {'opus': {'enabled': False}},
+        'roles': {'coordinator': {'profile': 'sol', 'effort': 'high'},
+                  'reviewer': {'profile': 'sol', 'effort': 'high'}},
+        'assignments': {'backend-builder': {
+            'profile': 'qwen', 'model': 'local/test-backend',
+            'roles': ['backend-builder']}},
+    }
+    config.write_text(yaml.safe_dump(settings), encoding='utf-8')
+    project = load_project(root)
+    pinned = models.profile(project, 'sol', control=True)
+    jobs.pin_coordinator(root, 'one', pinned)
+    saved = jobs.load(root, 'one')
+    result = json.loads(mcp_server.job_brief('one'))
+    assert result['model_policy'] == models.catalog(project)
+    assert result['model_pins'] == policy.describe(project)
+    assert result['model_pins']['assignments']['backend-builder']['roles'] == ['backend-builder']
+    assert result['coordinator_model'] == pinned.to_dict()
+    assert result['coordinator'] == saved['coordinator']
+    assert result['reviewers'] == saved['reviewers']
+    assert result['workflow_review'] == saved['workflow_review']
+    assert result['requests'] == saved['requests']
+    assert result['acceptance'] == saved['acceptance']
+    assert 'operational context ' * 100 not in json.dumps(result)

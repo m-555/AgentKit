@@ -61,7 +61,7 @@ def test_no_explicit_policy_keeps_legacy_control_and_worker_defaults(tmp_path):
     project = ProjectConfig(root=tmp_path)
     job = jobs.create(tmp_path, "legacy", "Keep defaults")
     assert [(p.name, p.effort) for p in models.control_candidates(project, job, "review")] == [
-        ("astra", "high"), ("opus", "high")]
+        ("sol", "high"), ("opus", "high")]
     assert [p.name for p in models.worker_candidates(project, {"kind": "SAFE_PARALLEL"})] == ["sol", "opus"]
     assert policy.validate_project(project) == []
 
@@ -101,6 +101,7 @@ def test_explicit_coordinator_never_substitutes_another_provider(state):
 @pytest.mark.parametrize("entry,message", [
     ({**SOL, "fallback": [OPUS]}, "cannot declare a fallback"),
     ({"profile": "sonnet", "effort": "xhigh"}, "profile must be one of"),
+    ({"profile": "astra", "effort": "high"}, "profile must be one of"),
     ({"profile": "sol", "effort": "minimal"}, "effort must be explicit"),
     ({"profile": "sol"}, "effort must be explicit"),
     ({**SOL, "temperature": 0}, "unknown keys"),
@@ -112,10 +113,10 @@ def test_invalid_control_entries_are_rejected(tmp_path, role_name, entry, messag
     assert policy.validate_project(project)
 
 
-@pytest.mark.parametrize("legacy", ["astra", "opus"])
+@pytest.mark.parametrize("legacy", ["astra", "sol", "opus"])
 def test_explicit_role_fails_closed_instead_of_accepting_legacy_models(state, legacy):
     _, project = state
-    selection = models.profile(project, legacy, control=True).to_dict()
+    selection = models.profile(project, legacy).to_dict()
     for role_name in ("reviewer", "coordinator"):
         with pytest.raises(ValueError, match="exact"):
             models.for_launch(project, {"_model_selection": selection}, selection["provider"], role_name)
@@ -127,13 +128,13 @@ def test_explicit_role_fails_closed_instead_of_accepting_legacy_models(state, le
 def test_persisted_coordinator_pin_outlives_a_policy_change(tmp_path):
     legacy = ProjectConfig(root=tmp_path)
     job = jobs.create(tmp_path, "running", "Keep my coordinator", "codex")
-    astra = models.control_candidates(legacy, job, "coordinator")[0]
-    job = jobs.pin_coordinator(tmp_path, "running", astra)
+    default = models.control_candidates(legacy, job, "coordinator")[0]
+    job = jobs.pin_coordinator(tmp_path, "running", default)
     changed = ProjectConfig(root=tmp_path, raw={k: v for k, v in PILOT.items()})
-    assert models.control_candidates(changed, job, "coordinator") == [astra]
-    task = {"job_id": "running", "_model_selection": astra.to_dict()}
-    assert models.for_launch(changed, task, "codex", "coordinator") == astra
-    assert models.for_launch(changed, {"job_id": "running"}, "codex", "coordinator") == astra
+    assert models.control_candidates(changed, job, "coordinator") == [default]
+    task = {"job_id": "running", "_model_selection": default.to_dict()}
+    assert models.for_launch(changed, task, "codex", "coordinator") == default
+    assert models.for_launch(changed, {"job_id": "running"}, "codex", "coordinator") == default
     sol = policy.role(changed, "coordinator").primary
     with pytest.raises(ValueError, match="persisted coordinator pin"):
         models.for_launch(changed, {"job_id": "running", "_model_selection": sol.to_dict()}, "codex", "coordinator")

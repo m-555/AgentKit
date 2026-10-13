@@ -69,6 +69,9 @@ def render_providers(conn: sqlite3.Connection) -> str:
         if state.available_at():
             lines.append(f"  {state.provider:<10} AVAILABLE")
             continue
+        if state.status == providers.HELD:
+            lines.append(f"  {state.provider:<10} HELD       until the user releases it - {state.reason}")
+            continue
         when = db.parse_ts(state.retry_at)
         stamp = when.astimezone().strftime("%H:%M") if when else "unknown"
         minutes = max(1, state.seconds_remaining() // 60)

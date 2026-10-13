@@ -405,11 +405,22 @@ def _auto_checkpoint(payload: dict[str, Any], reason: str) -> int:
     return 0
 
 
+def _manager_presence(payload: dict[str, Any]) -> None:
+    """A turn of the external manager chat renews its fresh lease (F29)."""
+    root, task_id = _context(payload)
+    session = payload.get("session_id")
+    if _managed(root) and task_id is None and isinstance(session, str):
+        from .manager_presence import renew
+        renew(root, session)
+
+
 def handle_pre_compact(payload: dict[str, Any]) -> int:
+    _manager_presence(payload)
     return _auto_checkpoint(payload, "pre_compact")
 
 
 def handle_stop(payload: dict[str, Any]) -> int:
+    _manager_presence(payload)
     return _auto_checkpoint(payload, "stop")
 
 

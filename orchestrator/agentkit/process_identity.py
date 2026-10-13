@@ -49,8 +49,12 @@ def alive(record, field="pid", *, probe=None):
     if saved and current:
         try:
             previous = json.loads(saved)
-            if current.get("source") == "cim" and previous.get("kind") == "windows":
-                return abs(previous["created"] - current["created"]) < 10
+            if previous.get("kind") == current.get("kind") == "windows":
+                # Birth ticks identify the process; probe source and display time do not.
+                # CIM can round either the saved token or the current observation.
+                delta = abs(previous["created"] - current["created"])
+                rounded = "cim" in (previous.get("source"), current.get("source"))
+                return delta < 10 if rounded else delta == 0
             return previous == current
         except (ValueError, TypeError, KeyError, AttributeError):
             return True

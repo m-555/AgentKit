@@ -122,5 +122,5 @@ def test_cli_viewer_prints_public_messages_once_while_worker_active(tmp_path, mo
     shown = []
     assert windows.watch(tmp_path, 1, reader=lambda *args: next(snapshots), sleeper=lambda seconds: None,
                          output=shown.append) == 0
-    assert shown.count("[message] Inspecting the scoped source.") == 1
+    assert sum("Builder:\n  Inspecting the scoped source." in line for line in shown) == 1
     assert not any("PRIVATE" in frame for frame in shown)

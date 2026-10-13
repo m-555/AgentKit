@@ -23,10 +23,10 @@ def row(identifier, *, status="RUNNING", monitor=True, child=False):
 def test_stopped_assignment_closes_despite_other_worker(monkeypatch):
     snapshots = iter([view(row(1), row(2)), view(row(1, monitor=False), row(2))])
     shown = []
-    monkeypatch.setattr(windows.live, "render", lambda state: state["processes"][0]["id"])
     assert windows.watch("unused", 1, reader=lambda root, identifier: next(snapshots),
                          sleeper=lambda seconds: None, output=shown.append) == 0
-    assert shown == [1]
+    assert shown[0].startswith("AgentKit #1 ") and len(shown) == 2  # header and status, once
+    assert not any("#2" in line for line in shown)
 
 
 def test_terminal_record_with_surviving_child_keeps_viewer():

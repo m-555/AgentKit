@@ -74,7 +74,8 @@ def test_a_different_executable_cannot_reuse_write_confinement_proof(project_roo
         second.write_bytes(first.read_bytes())
         install.path = str(second)
     elif change == "source":
-        install.source = "extension"
+        # PATH versus editor discovery of the same binary may reuse it (21176ff); another host may not.
+        install.source = "wsl"
     elif change == "version":
         install.version = "0.160.0"
     else:

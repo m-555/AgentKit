@@ -1,14 +1,28 @@
-# Two review workflows
+# Review workflows
 
-One user-facing coordinator plans, assigns and manages a job. It waits between
-new requests, meaningful blockers and completed work. There is no third manager
-workflow. The coordinator model is chosen per project and remains pinned for the
-job; the framework does not require Codex to manage every project.
+The assigner (the coordinator) turns a job into tasks once, and again when the
+user changes the job. It is not woken for stops, review findings or acceptance:
+stops wait for the user as problems ([When something stops](problems-and-phone.md)),
+and code accepts a finished job. The assigner model is chosen per project and
+remains pinned for the job; the framework does not require Codex to manage every
+project.
 
-| Choice | Task staging | Final feature acceptance |
+Every task has to pass its own gate before it can merge. `workflow.review` sets
+what follows:
+
+| Choice | Each task | The finished job |
 | --- | --- | --- |
-| human: lower expected AI usage | Code verifies scope, task checks, identity and merge preconditions | User tests the combined preview and approves its exact version |
-| ai: higher expected AI usage | Independent AI reviewer approves exact worker commits | Coordinator checks combined acceptance criteria |
+| once (default for new projects) | Its passing gate approves it (automation:gate) | One AI review of the combined change, then code accepts |
+| ai | An independent AI reviewer approves its exact commit | Code accepts: every task approved and merged, combined checks pass |
+| off | Its passing gate approves it | Code accepts on the combined checks alone |
+| human | Code verifies scope, task checks, identity and merge preconditions | The user tests the combined preview and approves its exact version |
+
+`once` costs one review session per job instead of one per task. When the final
+review asks for changes or cannot run, the job waits for the user: accept the
+result, review it again, or send the findings to the assigner. A gate approval
+never counts as a per-task review: switching a job from `once` or `off` to `ai`
+requires real reviews of its tasks, and switching to or from `human` stops the job
+until the configuration is restored.
 
 These labels describe expected relative usage, not a promised subscription
 percentage. Actual provider counters remain separate. Thinking is already inside
@@ -27,7 +41,7 @@ A minimal profile (preserves existing model policy and execution pause):
 ```yaml
 workflow:
   mode: separate-tasks
-  review: human # or ai
+  review: human # or once, ai, off
   worker_slots:
     backend-builder: 2
     backend-tester: 2
@@ -118,8 +132,9 @@ After implementation, code assembles a tester packet: approved commit, source
 paths, required behaviors and gate evidence. It verifies the correct source version
 is in the tester checkout before launching a fresh session. It copies no builder
 conversation and needs no extra planning call to rewrite a test prompt. Builders
-write source only; testers write/run focused tests only. Defects return to the
-planner as events for bounded repair assignments, never source edits by testers.
+write source only; testers write/run focused tests only. A builder's failed gate
+is retried by the builder; a tester's failure, like every other stop, waits for
+the user as a problem. Testers never edit source.
 
 Human mode records automation:human-staging. This is mechanical approval for the
 integration preview, not an AI code review or human product approval. Audit, clean

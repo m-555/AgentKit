@@ -103,6 +103,7 @@ def reconcile(root: str | Path, *, adopt_running: bool = False) -> ReconcileRepo
     try:
         _sync_specs(conn, specs, report)
         _expire_leases(conn, report)
+        _release_orphaned_leases(conn)
         _detect_stale_workers(conn, report, adopt_running=adopt_running)
         _find_orphans(conn, specs, report)
         report.promoted = db.refresh_ready(conn)
@@ -114,32 +115,36 @@ def reconcile(root: str | Path, *, adopt_running: bool = False) -> ReconcileRepo
     return report
 
 
+def _fields(task_spec: spec.TaskSpec) -> dict[str, Any]:
+    """The task row fields a spec decides."""
+    return {
+        "title": task_spec.title,
+        "description": task_spec.description,
+        "kind": task_spec.kind,
+        "role": task_spec.role,
+        "expected_write": task_spec.expected_write,
+        "expected_read": task_spec.expected_read,
+        "depends_on": task_spec.depends_on,
+        "gate_level": task_spec.gate_level,
+        "priority": task_spec.priority,
+        "contract_version": task_spec.contract_version,
+        "budget_usd": task_spec.budget_usd,
+        "job_id": task_spec.job_id,
+        "skills": task_spec.skills,
+        "acceptance": task_spec.acceptance,
+        "complexity": task_spec.complexity,
+        "model_profile": task_spec.model_profile,
+        "model_assignment": task_spec.model_assignment,
+    }
+
+
 def _sync_specs(
     conn: sqlite3.Connection, specs: list[spec.TaskSpec], report: ReconcileReport
 ) -> None:
     for task_spec in specs:
         existing = db.get_task_by_spec(conn, task_spec.spec_id)
         spec_hash = task_spec.hash()
-        fields: dict[str, Any] = {
-            "title": task_spec.title,
-            "description": task_spec.description,
-            "kind": task_spec.kind,
-            "role": task_spec.role,
-            "expected_write": task_spec.expected_write,
-            "expected_read": task_spec.expected_read,
-            "depends_on": task_spec.depends_on,
-            "gate_level": task_spec.gate_level,
-            "priority": task_spec.priority,
-            "contract_version": task_spec.contract_version,
-            "budget_usd": task_spec.budget_usd,
-            "job_id": task_spec.job_id,
-            "skills": task_spec.skills,
-            "acceptance": task_spec.acceptance,
-            "complexity": task_spec.complexity,
-            "model_profile": task_spec.model_profile,
-            "model_assignment": task_spec.model_assignment,
-            "spec_hash": spec_hash,
-        }
+        fields = {**_fields(task_spec), "spec_hash": spec_hash}
 
         if existing is None:
             db.create_task(
@@ -168,8 +173,12 @@ def _sync_specs(
             report.updated.append(task_spec.spec_id)
             continue
 
-        # In flight and the spec moved underneath it â€” Â§4.3.
-        db.update_task(conn, int(existing["id"]), spec_hash=spec_hash,
+        if status == sm.NEEDS_REPLAN:
+            continue  # Already waiting for the coordinator; the change stays pending (F36).
+        # In flight and the spec moved underneath it (§4.3). The old hash marks the change as
+        # pending: a requeue applies the current spec (F36). Recording the new hash here, without
+        # the fields, made a requeued task run its old spec where no later pass could notice.
+        db.update_task(conn, int(existing["id"]),
                        blocker=existing.get("blocker") or "spec changed while task was in flight")
         with suppress(sm.TransitionError):
             db.set_status(conn, int(existing["id"]), sm.NEEDS_REPLAN, actor="scheduler",
@@ -189,6 +198,30 @@ def _expire_leases(conn: sqlite3.Connection, report: ReconcileReport) -> None:
             effect="lease released; task will be marked STALE",
             detail={"lease": lease["id"], "path_glob": lease["path_glob"]},
         )
+
+
+_ORPHAN_STATES = ("READY", "PLANNED", "NEEDS_REPLAN", "DONE", "CANCELLED", "SUPERSEDED")
+
+
+def _release_orphaned_leases(conn: sqlite3.Connection) -> None:
+    """Release expired leases held by tasks that are not running and own no process (F28).
+
+    Missed-heartbeat expiry covers running tasks; a BLOCKED task keeps its lease
+    on purpose while paused. An expired lease of a READY or finished task with
+    no live process protects nothing, yet it blocked every claim on its paths.
+    """
+    from . import processes
+    now = datetime.now(UTC)
+    live = {p["task_id"] for p in processes.owning(conn)}
+    marks = ", ".join("?" for _ in _ORPHAN_STATES)
+    rows = conn.execute(
+        f"SELECT DISTINCT l.task_id, l.expires_at FROM leases l JOIN tasks t ON t.id = l.task_id "
+        f"WHERE l.released_at IS NULL AND l.expires_at IS NOT NULL AND t.status IN ({marks})",
+        _ORPHAN_STATES).fetchall()
+    for task_id, expires_at in rows:
+        stamp = db.parse_ts(expires_at)
+        if task_id not in live and stamp is not None and stamp < now:
+            db.release_leases(conn, task_id, reason="expired lease of a task that is not running")
 
 
 def _detect_stale_workers(
@@ -310,3 +343,16 @@ def _pending_spawn(task, run):
             return False
         stamp = db.parse_ts(task.get('updated_at'))
     return bool(stamp and 0 <= (datetime.now(UTC) - stamp).total_seconds() < 60)
+
+
+def apply_current_spec(conn: sqlite3.Connection, root: str | Path, task_id: int) -> bool:
+    """Bring a task that is not running up to its current spec before a requeue (F36)."""
+    task = db.get_task(conn, task_id)
+    current = next((s for s in spec.load(Path(root)) if task and s.spec_id == task.get("spec_id")), None)
+    if current is None:
+        return False
+    db.update_task(conn, task_id, owned_paths=current.expected_write, spec_hash=current.hash(),
+                   **_fields(current))
+    db.log_event(conn, task_id, "spec_applied", cause="coordinator requeue",
+                 effect=f"spec {current.hash()}")
+    return True

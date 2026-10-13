@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import live, public_activity, terminal_mirror
@@ -49,9 +50,58 @@ def _display(frame):
     print(frame, flush=True)
 
 
+_SPEAKERS = {"coordinator": "Manager", "review": "Reviewer", "reviewer": "Reviewer"}
+_TOOL_PREFIXES = ("mcp__plugin_agentkit_agentkit__", "mcp__agentkit__", "agentkit_")
+
+
+def speaker(role) -> str:
+    """Who is talking, in the user's words: the coordinator is the manager."""
+    role = str(role or "agent")
+    return _SPEAKERS.get(role, role.removeprefix("backend-").removeprefix("frontend-").capitalize())
+
+
+def _clock(stamp) -> str:
+    try:
+        return datetime.fromisoformat(str(stamp)).astimezone().strftime("%H:%M:%S")
+    except ValueError:
+        return "--:--:--"
+
+
+def header(row: dict) -> str:
+    """Printed once: which agent this window follows and what it shows."""
+    task = f" · task {row['task_id']}" if row.get("task_id") else ""
+    job = f" · job {row['job_id']}" if row.get("job_id") else ""
+    return (f"AgentKit #{row['id']} · {speaker(row.get('role'))} · {row.get('model')} "
+            f"(effort {row.get('effort')}){task}{job}\n"
+            "This window shows what the agent says and the tools it uses. It closes by itself when the "
+            "agent stops.\nFor technical details run: agentkit live\n")
+
+
+def chat_line(message: dict, role) -> str | None:
+    """One public message as chat text; tool use as a short line; noise is dropped."""
+    at = _clock(message.get("at"))
+    if message["kind"] == "message":
+        body = "\n".join("  " + line for line in str(message["text"]).splitlines())
+        return f"\n{at}  {speaker(role)}:\n{body}"
+    words = str(message["text"]).split()
+    if len(words) >= 2 and words[0] == "tool" and words[-1] in ("started", "tool_started", "tool_use"):
+        name = words[1]
+        for prefix in _TOOL_PREFIXES:
+            name = name.removeprefix(prefix)
+        return f"{at}  · uses {name}"
+    if words[:1] == ["error"]:
+        return f"{at}  · the provider reported an error"
+    return None  # quota notices, lifecycle and finished tools are status, not conversation
+
+
 def watch(root, identifier: int, *, poll_seconds=2.0, output=_display,
           sleeper=time.sleep, reader=read_snapshot, title=None) -> int:
-    """Exit when the assigned monitor and child stop. Never kill either process."""
+    """Exit when the assigned monitor and child stop. Never kill either process.
+
+    The window reads like a chat (the user could not follow repainted status
+    frames): a header once, the agent's own words, one line per tool, and a
+    line when the status changes.
+    """
     if identifier < 1 or not math.isfinite(poll_seconds) or poll_seconds < 0.1:
         return 2
     previous: dict | str | None = None
@@ -78,15 +128,19 @@ def watch(root, identifier: int, *, poll_seconds=2.0, output=_display,
                       f"requested {requested}; reported {reported}")
                 if reader is read_snapshot:
                     terminal_mirror.register_viewer(Path(root), identifier)
-            # Avoid repeating an identical frame solely because the clock advanced.
-            current = {**active, "at": "current"}
-            if current != previous:
-                output(live.render(active))
-                previous = current
+            state = f"{row.get('state') or row.get('status')}" + (
+                f" / {row['progress']}" if row.get("progress") else "")
+            if not isinstance(previous, dict):
+                output(header(row))
+            if not isinstance(previous, dict) or previous.get("state") != state:
+                output(f"{datetime.now().strftime('%H:%M:%S')}  status: {state}")
+            previous = {"state": state}
             stream = public_activity.read(Path(root), identifier)
             for message in stream["messages"]:
                 if message["id"] not in shown:
-                    output(f"[{message['kind']}] {message['text']}")
+                    line = chat_line(message, row.get("role"))
+                    if line:
+                        output(line)
                     shown.add(message["id"])
             if len(shown) > 2048:
                 shown = {message["id"] for message in stream["messages"]}

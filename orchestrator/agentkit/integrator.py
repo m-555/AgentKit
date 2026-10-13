@@ -223,6 +223,10 @@ def _merge_one(conn, project, task, *, run_full_gate=True) -> MergeOutcome:
         pre = verify(conn, project, task)
         if pre.ok:
             approved_head = reviews.require_approval(conn, task, project)
+            from .integration_remediation import merge_problem
+            problem = merge_problem(conn, project, task, target)
+            if problem:
+                raise ValueError(problem)
         work = integration_worktree(project)
         if not repo.is_clean(work):
             raise ValueError("integration worktree is dirty; preserved for inspection")

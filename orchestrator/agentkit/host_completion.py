@@ -62,6 +62,8 @@ def validate_preserved(conn, project, task):
 
 def complete(conn, project, task_id: int, message: str) -> str:
     """Commit exact preserved edits and verify them; independent review follows."""
+    from .commit_message import without_attribution
+    message = without_attribution(message)  # the user is the only author
     if not message.strip() or len(message) > 2000 or "\0" in message:
         raise ValueError("commit message must contain 1-2000 characters")
     with exclusive(project.root, f"commit-task-{task_id}"):

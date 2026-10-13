@@ -91,7 +91,7 @@ def scope(conn: sqlite3.Connection, project, *, where: str | None = None, task_i
     if not identifier and (os.environ.get("AGENTKIT_ROLE") or os.environ.get("AGENTKIT_TASK")):
         raise PermissionError("a supervised source caller requires an active control process")
     if identifier:
-        process = processes.require_control(conn, purposes=("review", "coordinator"))
+        process = processes.require_control(conn, purposes=("review", "coordinator", "final_review"))
     if process is not None and process["purpose"] == "review":
         if (where not in (None, "task")) or (task_id is not None and task_id != process["task_id"]):
             raise PermissionError("a reviewer may read only the commit it was assigned")

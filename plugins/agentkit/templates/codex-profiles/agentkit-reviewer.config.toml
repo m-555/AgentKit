@@ -3,7 +3,7 @@
 #
 # Use with: codex exec -p agentkit-reviewer
 
-model = "gpt-6-astra"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "xhigh"
 approval_policy = "never"
 sandbox_mode = "read-only"

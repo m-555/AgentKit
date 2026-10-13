@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import db, globs
+from . import statemachine as sm
 from .config import ProjectConfig
 from .paths import is_managed
 
@@ -29,7 +30,7 @@ ALWAYS_PROTECTED = (
     ".ai/tasks.db-shm",
 )
 
-CLAIM_STATES = (*db.ACTIVE_STATES, "BLOCKED", "STALE", "NEEDS_REPLAN", "FAILED")
+CLAIM_STATES = sm.OWNS_PATHS
 
 
 #: Human-held leases. A real task, so it is conflict-checked and logged like any other.

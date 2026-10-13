@@ -29,15 +29,53 @@ def fresh(record: dict, now=None) -> bool:
 
 
 def blocks_spawn(conn, job_id: str) -> bool:
+    """True while an attached external manager owns the job: its heartbeat is fresh.
+
+    A live bridge process is no proof of a manager. The editor keeps a chat's
+    process alive while the chat waits at a usage limit or for its user, so after
+    a reset nobody resumed the work (F29). A lapsed or released lease records the
+    outage and lets the CLI coordinator take over; the returning chat waits for
+    that coordinator to finish, then renews and audits.
+    """
     record = lease(conn, job_id)
     if not record:
         return False
-    if fresh(record) or not record["pid"] or pid_alive(record["pid"]):
+    if fresh(record):
         return True
     if not record["outage_recorded"]:
-        manager_state.record_outage(conn, job_id, record["provider"], "external manager lease ended; bridge process confirmed stopped")
+        manager_state.record_outage(conn, job_id, record["provider"], "external manager lease lapsed or released")
         conn.execute("UPDATE manager_leases SET outage_recorded=1 WHERE job_id=?", (job_id,))
     return False
+
+
+def coordinator_owner(conn, job_id: str) -> dict | None:
+    return next((p for p in processes.owning(conn) if p["purpose"] == "coordinator" and p["job_id"] == job_id), None)
+
+
+def wait_for_coordinator(conn, job_id: str) -> None:
+    """One manager at a time: a returning chat waits while the coordinator manages."""
+    owner = coordinator_owner(conn, job_id)
+    if owner:
+        raise PermissionError(f"the coordinator (process {owner['id']}) manages this job while the external lease is "
+                              "lapsed; renew after it finishes")
+
+
+def planner_authority(root, job_id: str) -> dict | None:
+    """The authority an interactive manager call needs; each verified call renews the lease."""
+    from .mcp_manager import credential
+    conn = db.connect(root)
+    try:
+        if blocks_spawn(conn, job_id):
+            token = credential(root, job_id)
+            if not token:
+                raise PermissionError("external manager lease owns this job")
+            record = require_lease(conn, job_id, token)
+            conn.execute("UPDATE manager_leases SET heartbeat_at=? WHERE job_id=?", (db.utcnow(), job_id))
+            return record
+        wait_for_coordinator(conn, job_id)
+        return None  # Interactive operator connection.
+    finally:
+        conn.close()
 
 
 def attach(conn, root, job_id: str, holder: str, pid: int, *, ttl_seconds=90, selection=None, session_ref="") -> str:
@@ -77,9 +115,11 @@ def handover(conn, job_id: str, token: str, holder: str, pid: int, *, session_re
     """Move this job's lease to the user's next manager session; returns its new credential.
 
     The current credential proves the caller holds the lease, so the previous
-    chat's bridge need not still be running. Pin and recovery epoch are
-    unchanged and the lease never lapses, so no CLI coordinator can be spawned
-    in between; the previous credential stops working.
+    chat's bridge need not still be running. A live lease keeps its pin and
+    recovery epoch, so no CLI coordinator can be spawned in between; the
+    previous credential stops working. A lease that already lapsed records the
+    outage like a late heartbeat, so the new manager must audit and acknowledge
+    what happened while nobody held the job (F18).
     """
     if os.environ.get("AGENTKIT_PROCESS") or os.environ.get("AGENTKIT_TASK"):
         raise PermissionError("a supervised worker or coordinator cannot take over the manager lease")
@@ -90,13 +130,18 @@ def handover(conn, job_id: str, token: str, holder: str, pid: int, *, session_re
         if (not record or record["released_at"] or
                 not hmac.compare_digest(record["token_hash"], hashlib.sha256(token.encode()).hexdigest())):
             raise PermissionError("invalid external manager lease credential")
+        lapsed = not fresh(record)
+        if lapsed:
+            wait_for_coordinator(conn, job_id)
+            manager_state.record_outage(conn, job_id, record["provider"],
+                                        "external manager lease expired before handover")
         new_token = secrets.token_urlsafe(32)
         conn.execute("UPDATE manager_leases SET holder=?,token_hash=?,session_ref=?,pid=?,ttl_seconds=?,"
                      "heartbeat_at=?,outage_recorded=0 WHERE job_id=?",
                      (holder, hashlib.sha256(new_token.encode()).hexdigest(), session_ref, pid, ttl_seconds,
                       db.utcnow(), job_id))
         db.log_event(conn, None, "external_manager_handover",
-                     detail={"job": job_id, "from": record["holder"], "to": holder, "pid": pid,
+                     detail={"job": job_id, "from": record["holder"], "to": holder, "pid": pid, "lapsed": lapsed,
                              "model": {"provider": record["provider"], "model": record["model"],
                                        "effort": record["effort"]}})
     return new_token
@@ -115,8 +160,10 @@ def heartbeat(conn, job_id: str, token: str) -> None:
     with db.immediate_transaction(conn):
         record = require_lease(conn, job_id, token, allow_expired=True)
         if not fresh(record):
+            wait_for_coordinator(conn, job_id)
             manager_state.record_outage(conn, job_id, record["provider"], "external manager heartbeat expired; authenticated holder renewed")
-        conn.execute("UPDATE manager_leases SET heartbeat_at=? WHERE job_id=?", (db.utcnow(), job_id))
+        # A renewed lease records its next lapse again.
+        conn.execute("UPDATE manager_leases SET heartbeat_at=?,outage_recorded=0 WHERE job_id=?", (db.utcnow(), job_id))
 
 
 def checkpoint(conn, job_id: str, token: str, payload: dict) -> int:
@@ -143,7 +190,32 @@ def release(conn, job_id: str, token: str, reason: str = "external manager relea
         manager_state.record_outage(conn, job_id, record["provider"], reason)
 
 
-def packet(conn, job_id: str) -> dict:
+_BULKY = ("audit_report", "authorized_signatures", "ack_evidence")
+_BULKY_LIMIT = 2000
+
+
+def _summary(job_id: str, value: str) -> dict:
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        decoded = None
+    summary: dict = {"omitted_characters": len(value)}
+    if isinstance(decoded, dict):
+        summary["keys"] = sorted(decoded)[:40]
+    summary["full"] = f"agentkit manager status {job_id} --full"
+    return summary
+
+
+def packet(conn, job_id: str, *, full: bool = False) -> dict:
+    """Recovery state and the latest external checkpoint.
+
+    Status, job history and the coordinator's recovery prompt all embed this, so
+    a bulky field (an audit report reached 2 MB) is summarised unless ``full``.
+    The digest and epochs are always exact (F17).
+    """
     state = manager_state.state(conn, job_id)
+    if not full:
+        state = {key: _summary(job_id, value) if key in _BULKY and isinstance(value, str)
+                 and len(value) > _BULKY_LIMIT else value for key, value in state.items()}
     row = conn.execute("SELECT * FROM manager_checkpoints WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
     return {"recovery": state, "external_checkpoint": json.loads(row["payload"]) if row else None}

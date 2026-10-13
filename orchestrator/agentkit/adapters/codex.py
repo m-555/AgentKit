@@ -19,6 +19,16 @@ from .. import errors as _errors
 from ..capabilities import CapabilitySet
 from .base import AgentEvent, BaseAdapter, GuardReport, Installation, Launch
 
+#: Every AgentKit session gets its skills and instructions from its prompt and brief.
+#: Sub-agents, the user's plugins and app connectors, image/browser/computer tools and
+#: the skill catalog only add tokens that every request re-sends.
+LEAN_CONFIG = (
+    "features.multi_agent=false", "features.multi_agent_v2=false", "features.plugins=false",
+    "features.apps=false", "features.image_generation=false", "features.browser_use=false",
+    "features.computer_use=false", "features.tool_suggest=false", "features.skill_search=false",
+    "skills.include_instructions=false",
+)
+
 #: Hook events recovered from the binary. Retained for probe use; not depended on.
 KNOWN_HOOK_EVENTS = (
     "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact",
@@ -136,7 +146,7 @@ class CodexAdapter(BaseAdapter):
         *, prompt: str, resume_token: str | None = None,
     ) -> Launch:
         from .. import workflow
-        resume_token = workflow.resume_token(project, {"session_token": resume_token}, True)
+        resume_token = workflow.resume_token(project, {"session_token": resume_token}, True, role=role)
         install = self.detect()
         argv: list[str] = [install.path if install else "codex", "exec"]
         if resume_token:
@@ -156,8 +166,8 @@ class CodexAdapter(BaseAdapter):
                  "-c", 'mcp_servers.agentkit.required=true']
         from ..codex_mcp_policy import approval_flags
         argv += approval_flags(role, readonly=readonly)
-        if workflow.enabled(project):
-            argv += ["-c", "features.multi_agent=false", "-c", "features.multi_agent_v2=false"]
+        for setting in LEAN_CONFIG:
+            argv += ["-c", setting]
         if not resume_token:
             argv += ["--cd", str(worktree)]
         from ..models import for_launch

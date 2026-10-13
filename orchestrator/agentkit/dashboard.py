@@ -4,9 +4,11 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sqlite3
 import webbrowser
 from contextlib import suppress
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
@@ -158,13 +160,24 @@ class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) -> DashboardServer:
+def make_server(root: str | Path, port: int = 8765, *, operator_controls=False, home=False) -> DashboardServer:
+    """`home` serves every listed repository; the page picks one (dashboard_home)."""
     root = Path(root).resolve()
+    from . import dashboard_home
     from .dashboard_actions import Controls
-    controls = Controls(root, operator_controls)
+    controls_by_root: dict[Path, Controls] = {}
+
+    def controls_for(here: Path) -> Controls:
+        if here not in controls_by_root:
+            controls_by_root[here] = Controls(here, operator_controls)
+        return controls_by_root[here]
+    controls_for(root)
+    started = datetime.now(UTC).isoformat()
     html = Path(__file__).with_name("dashboard.html").read_bytes()
     assets = {"/" + name: Path(__file__).with_name(name).read_bytes()
-              for name in ("dashboard_team.js", "dashboard_view.js", "dashboard_allowance.js", "dashboard_review.js", "dashboard_categories.js", "dashboard_workspaces.js", "dashboard_recovery.js", "dashboard_activity.js")}
+              for name in ("dashboard_team.js", "dashboard_view.js", "dashboard_allowance.js", "dashboard_review.js", "dashboard_categories.js", "dashboard_workspaces.js", "dashboard_recovery.js", "dashboard_activity.js", "dashboard_chat.js",
+                           "dashboard_tabs.js", "dashboard_agents.js", "dashboard_settings.js", "dashboard_jobs.js",
+                           "dashboard_job_form.js", "dashboard_phone.js")}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AgentKitDashboard"
@@ -196,11 +209,16 @@ def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) 
             origin = self.headers.get("Origin")
             return host in hosts and (not origin or origin == f"http://{host}")
 
+        def _here(self) -> Path:
+            return dashboard_home.selected(Path(root), self.headers.get("Cookie"), home=home)
+
         def do_GET(self) -> None:
             if not self._local_request():
                 self._send(403, b"Local origin required.\n", "text/plain; charset=utf-8")
                 return
             route = urlsplit(self.path).path
+            here = self._here()
+            controls = controls_for(here)
             if route == "/":
                 self._send(200, html, "text/html; charset=utf-8")
             elif route in assets:
@@ -208,14 +226,14 @@ def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) 
             elif route == "/api/workspaces":
                 from .workspace_view import snapshot
                 try:
-                    self._send(200, json.dumps(snapshot(root)).encode("utf-8"), "application/json; charset=utf-8")
+                    self._send(200, json.dumps(snapshot(here)).encode("utf-8"), "application/json; charset=utf-8")
                 except Exception:
                     self._send(503, b'{"message":"Workspace inventory unavailable; preserve state for recovery."}', "application/json; charset=utf-8")
             elif route == "/api/reviews":
                 self._send(200, json.dumps(controls.snapshot()).encode("utf-8"), "application/json; charset=utf-8")
             elif route == "/api/snapshot":
                 try:
-                    body = json.dumps(build_snapshot(root), ensure_ascii=True,
+                    body = json.dumps(build_snapshot(here), ensure_ascii=True,
                                       allow_nan=False).encode("utf-8")
                 except Exception:
                     self._send(503, b'{"status":"unavailable","message":"Snapshot unavailable."}',
@@ -228,12 +246,42 @@ def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) 
                 if not identifier.isascii() or not identifier.isdecimal() or not 0 < len(identifier) < 10:
                     self._send(404, b"Not found.\n", "text/plain; charset=utf-8")
                     return
-                status, result = endpoint(Path(root), int(identifier))
+                status, result = endpoint(here, int(identifier))
                 self._send(status, json.dumps(result).encode("utf-8"), "application/json; charset=utf-8")
+            elif route == "/api/view":  # who serves this port: lets `agentkit view` and the page check
+                from .project_registry import projects
+                self._send(200, json.dumps({"pid": os.getpid(), "root": str(root), "started_at": started,
+                                            "operator_controls": controls.enabled, "home": home,
+                                            "roots": [row["root"] for row in projects()] if home else []}
+                                           ).encode("utf-8"), "application/json; charset=utf-8")
+            elif route in ("/api/repos", "/api/settings", "/api/jobs", "/api/phone"):
+                try:
+                    result = (dashboard_home.repos(here) if route == "/api/repos" else dashboard_home.settings(here)
+                              if route == "/api/settings" else dashboard_home.jobs(here) if route == "/api/jobs"
+                              else dashboard_home.phone(here))
+                    self._send(200, json.dumps(result, default=str).encode("utf-8"), "application/json; charset=utf-8")
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    self._send(503, json.dumps({"message": f"Unavailable: {exc}"}).encode("utf-8"),
+                               "application/json; charset=utf-8")
+            elif route == "/api/agents":
+                from .dashboard_agents import agents
+                self._send(200, json.dumps({"agents": agents(here)}).encode("utf-8"), "application/json; charset=utf-8")
+            elif route == "/api/manager-chat":
+                from urllib.parse import parse_qs
+
+                from .manager_chat import jobs_with_chat, transcript
+                from .manager_presence import describe
+                job = (parse_qs(urlsplit(self.path).query).get("job") or [""])[0]
+                try:
+                    result = ({"job": job, "messages": transcript(here, job), "manager": describe(here, job)}
+                              if job else {"jobs": jobs_with_chat(here)})
+                    self._send(200, json.dumps(result).encode("utf-8"), "application/json; charset=utf-8")
+                except (ValueError, OSError):
+                    self._send(404, b'{"message":"Unknown job."}', "application/json; charset=utf-8")
             elif route.startswith("/api/terminal/"):
                 from .terminal_mirror import frame
                 key = route.removeprefix("/api/terminal/")
-                status, body, kind = frame(Path(root), key)
+                status, body, kind = frame(here, key)
                 self._send(status, body, kind)
             else:
                 self._send(404, b"Not found.\n", "text/plain; charset=utf-8")
@@ -247,10 +295,11 @@ def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) 
         def do_POST(self) -> None:
             # Drain small bodies even on rejection, so Windows clients receive
             # the HTTP refusal instead of an unread-body connection reset.
-            self.connection.settimeout(10)
+            self.connection.settimeout(60)
+            from .dashboard_actions import body_limit
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if 0 < length <= 16384 else b""
+                body = self.rfile.read(length) if 0 < length <= body_limit(urlsplit(self.path).path) else b""
             except (ValueError, OSError):
                 self._send(400, b"Invalid request body.\n", "text/plain; charset=utf-8")
                 return
@@ -258,7 +307,7 @@ def make_server(root: str | Path, port: int = 8765, *, operator_controls=False) 
                 self._send(403, b"Local origin required.\n", "text/plain; charset=utf-8")
                 return
             self.connection.settimeout(10)
-            status, result = controls.post(urlsplit(self.path).path, self.headers, io.BytesIO(body))
+            status, result = controls_for(self._here()).post(urlsplit(self.path).path, self.headers, io.BytesIO(body))
             self._send(status, json.dumps(result).encode("utf-8"), "application/json; charset=utf-8")
 
         do_PUT = _reject_mutation
@@ -275,14 +324,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8765, help="Local HTTP port (default: 8765)")
     parser.add_argument("--open", action="store_true", help="Open the dashboard in your browser")
     parser.add_argument("--operator-controls", action="store_true", help="Enable local human decisions and idle-project profile changes; starts no jobs")
+    parser.add_argument("--home", action="store_true", help="Serve every listed AgentKit repository, starting with --root")
     args = parser.parse_args(argv)
     if not args.root.is_dir():
         parser.error("--root must be an existing directory")
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
     try:
-        server = (make_server(args.root, args.port, operator_controls=True) if args.operator_controls
-                  else make_server(args.root, args.port))
+        options = {**({"operator_controls": True} if args.operator_controls else {}), **({"home": True} if args.home else {})}
+        server = make_server(args.root, args.port, **options)
     except OSError as exc:
         parser.exit(1, f"Cannot start dashboard: {exc}\n")
     url = f"http://127.0.0.1:{server.server_address[1]}/"

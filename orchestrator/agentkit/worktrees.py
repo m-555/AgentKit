@@ -155,7 +155,8 @@ def ensure(
         args += [str(target), branch]
     else:
         from .integrator import ensure_integration_branch
-        base = ensure_integration_branch(project or ProjectConfig(root=root_path))
+        base = _coupled_base(root_path, task) or ensure_integration_branch(
+            project or ProjectConfig(root=root_path))
         args += ["-b", branch, str(target), base]
 
     try:
@@ -170,6 +171,20 @@ def ensure(
 
     workspace_registry.record(root_path, task, phase="created", head=repo.head_commit(target))
     return target, True
+
+
+def _coupled_base(root: Path, task: dict[str, Any]) -> str | None:
+    """A coupled tester starts from its held source's approved head (F38)."""
+    if task.get("id") is None:
+        return None
+    from . import db
+    from .integration_remediation import held_source
+    conn = db.connect(root)
+    try:
+        held = held_source(conn, task)
+    finally:
+        conn.close()
+    return held[1] if held else None
 
 
 def provision(

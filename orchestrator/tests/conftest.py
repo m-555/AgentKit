@@ -30,6 +30,12 @@ def commit_all(repo: Path, message: str) -> str:
     return git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def agentkit_home(tmp_path_factory, monkeypatch):
+    """Tests never read or write the user's list of AgentKit repositories."""
+    monkeypatch.setenv("AGENTKIT_HOME", str(tmp_path_factory.mktemp("agentkit-home")))
+
+
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     """A small, realistic repository: two services, a router, tests and a contract."""

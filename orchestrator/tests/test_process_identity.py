@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agentkit import process_identity as identity
 
 
@@ -56,3 +58,26 @@ def test_cim_fallback_is_bounded_read_only_and_unknown_stays_unknown(monkeypatch
     assert identity.windows_birth("123; Stop-Process") is None
     monkeypatch.setattr(identity.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=""))
     assert identity.windows_birth(123) is None
+
+
+@pytest.mark.parametrize(
+    ("previous", "current", "expected"),
+    [
+        ({"kind": "windows", "created": 220, "source": "cim"},
+         {"kind": "windows", "created": 221}, True),
+        ({"kind": "windows", "created": 221},
+         {"kind": "windows", "created": 220, "source": "cim"}, True),
+        ({"kind": "windows", "created": 220, "source": "cim"},
+         {"kind": "windows", "created": 240}, False),
+        ({"kind": "windows", "created": 220},
+         {"kind": "windows", "created": 221}, False),
+        ({"kind": "windows", "created": 220, "born": "display-one"},
+         {"kind": "windows", "created": 220, "born": "display-two"}, True),
+        ({"kind": "linux", "created": "220", "boot": "old"},
+         {"kind": "linux", "created": "220", "boot": "new"}, False),
+    ],
+)
+def test_windows_birth_identity_survives_probe_source_changes(monkeypatch, previous, current, expected):
+    monkeypatch.setattr(identity, "fingerprint", lambda pid: current)
+    record = {"pid": 123, "pid_identity": json.dumps(previous)}
+    assert identity.alive(record, probe=lambda pid: True) is expected

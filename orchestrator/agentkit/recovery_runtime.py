@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import adapters, db, processes, providers, repo, wake_adapters
@@ -14,7 +15,7 @@ def process_session(conn, process):
     return store.register(conn, identifier=f"cli:{process['id']}", provider=process["provider"],
                           account=runtime.account_id() if runtime else "default", host="cli",
                           role="manager" if process["purpose"] == "coordinator" else
-                          "reviewer" if process["purpose"] == "review" else "worker",
+                          "reviewer" if process["purpose"] in ("review", "final_review") else "worker",
                           reference=str(process["id"]), job_id=process.get("job_id"),
                           task_id=process.get("task_id"), process_id=process["id"],
                           policy="unmetered" if providers.unmetered(process["provider"]) else "subscription",
@@ -71,11 +72,55 @@ def park_worker(conn, task, meta):
     return store.get(conn, intent["id"])
 
 
+_FRESH_SECONDS = 300
+
+
+def launch_blocker(conn, task_id) -> str | None:
+    """Why a task parked by a limit must not be prepared yet; None when it may proceed.
+
+    Read-only, so the scheduler can ask before it claims, bumps the generation or
+    prepares anything (F26). The guarded launch still runs the full authorization.
+    """
+    intent = pending(conn, task_id=task_id)
+    if not intent or intent["state"] != "WAITING_AVAILABILITY":
+        return None
+    session = store.session(conn, intent["session_id"])
+    evidence = account_evidence(conn, session["provider"], session["account"])
+    if providers.unmetered(session["provider"]):
+        available = evidence["healthy"]
+    else:
+        available = evidence["available"] and evidence["complete"] and all(
+            isinstance(w.get("used_percent"), (int, float)) and 0 <= w["used_percent"] < 100
+            for w in evidence["windows"])
+    stamp = db.parse_ts(evidence["observed_at"])
+    fresh = stamp is not None and (datetime.now(UTC) - stamp).total_seconds() <= _FRESH_SECONDS
+    if available and fresh:
+        return None
+    return (f"quota recovery for {session['provider']} is waiting for fresh availability evidence; "
+            "the supervisor re-checks once per poll interval")
+
+
+def waiting_for(conn, provider, account) -> bool:
+    """A recovery intent waits for this account's availability (F25)."""
+    return conn.execute(
+        "SELECT 1 FROM recovery_intents i JOIN recovery_sessions s ON s.id=i.session_id "
+        "WHERE i.state='WAITING_AVAILABILITY' AND s.provider=? AND s.account=? LIMIT 1",
+        (provider, account)).fetchone() is not None
+
+
+def _not_yet_reset(window, now):
+    stamp = db.parse_ts(window.get("resets_at"))
+    return stamp is None or stamp > now
+
+
 def account_evidence(conn, provider, account):
     state = providers.get_state(conn, provider, account)
+    # A window whose reset time has passed no longer limits anything, even if no
+    # check has rewritten it since (F25: a 100% five-hour window held a task forever).
+    now = datetime.now(UTC)
     windows = [dict(r) for r in conn.execute(
         "SELECT window,used_percent,resets_at FROM quota_windows WHERE account_key=?",
-        (providers.account_key(provider, account),))]
+        (providers.account_key(provider, account),)) if _not_yet_reset(dict(r), now)]
     return {"observed_at": state.detected_at, "available": state.status == providers.AVAILABLE,
             "healthy": state.status == providers.AVAILABLE, "complete": state.status == providers.AVAILABLE,
             "windows": windows, "provider": provider, "account": account}
@@ -120,11 +165,18 @@ def worker_ready(conn, task, meta):
 
 
 def before_launch(conn, root, *, purpose, provider, task_id=None, job_id=None):
+    if purpose == "final_review":
+        return None  # a job's final review continues no parked session; it never claims the manager's
     intent = pending(conn, task_id=task_id, job_id=job_id)
     if not intent:
         return None
     valid, current = authorize(conn, root, intent, provider=provider, allow_generation_step=True)
     if not valid:
+        if (store.get(conn, intent["id"]) or {}).get("state") == "CANCELLED":
+            # F27: the parked turn cannot resume as it was (pause, revision or preserved
+            # bytes changed). Keep the cancellation and let the scheduler's own guards
+            # launch the task fresh; raising here rolled the cancellation back forever.
+            return None
         raise ValueError("Recovery intent is not ready; inspect authorization, allowance and ownership")
     attempt = store.claim(conn, intent["id"], "guarded-cli-launch", proof=current,
                           authorization=intent["authorization"])

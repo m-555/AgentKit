@@ -161,6 +161,9 @@ def finish_worker(conn, root, process, code, failure_text):
         _retry(conn, task, "Commit the preserved in-scope changes and rerun the gate.")
         return
     head = repo.head_commit(work)
+    from .infra_stop import resubmitted
+    if resubmitted(conn, task_id, head):
+        return  # never send review the commit it already rejected
     cached = db.cached_gate(conn, task_id, task["gate_level"], head)
     if cached and cached["passed"]:
         passed, summary = True, cached["summary"]
@@ -178,6 +181,7 @@ def finish_worker(conn, root, process, code, failure_text):
     assert current is not None
     if current["status"] == "VERIFYING":
         db.set_status(conn, task_id, "REVIEW", cause="clean committed work and gate passed")
+        db.update_task(conn, task_id, blocker=None)  # an earlier failure no longer describes this commit
         from .policy import clear_trigger
         clear_trigger(conn, task_id)
 

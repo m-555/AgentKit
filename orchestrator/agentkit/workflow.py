@@ -1,10 +1,17 @@
-"""Opt-in separate builder/tester workflow (`workflow.mode: separate-tasks`).
+"""The managed workflows: `workflow.mode: feature` (the default for new projects) or
+`separate-tasks`.
 
-With the mode enabled in `.ai/project.yaml`, every worker task is one short,
-exact-file assignment for one of four roles: builders write only source files,
-testers write only test files against the implementation they depend on, and
-every launch is a fresh session. With it disabled each function reproduces the
-behaviour that existed before this module, so callers may use it unconditionally.
+Feature: one builder owns a feature end to end in one session (plan, source, tests
+and its gate), a retry resumes that session, and an independent reviewer checks the
+final commit. Parallel work is whole independent features with disjoint files.
+
+Separate-tasks: every worker task is one short, exact-file assignment for one of four
+roles: builders write only source files, testers write only test files against the
+implementation they depend on, and every launch is a fresh session.
+
+Both share the managed machinery (exact owned files, compact job intent, preparation,
+host monitoring, run limits). With neither each function reproduces the behaviour
+that existed before this module, so callers may use it unconditionally.
 
 Nothing here truncates. A task or job intent that does not fit the limits is
 refused with an explicit error so the plan is changed, never silently shortened.
@@ -19,7 +26,11 @@ from typing import Any
 from . import jobs
 
 _MODE = "separate-tasks"
+_FEATURE = "feature"
+MODES = (_FEATURE, _MODE)
 _BUILDERS = ("backend-builder", "frontend-builder")
+#: In feature mode the planner's generic implementer is a feature builder too.
+_FEATURE_BUILDERS = (*_BUILDERS, "implementer")
 _TESTERS = ("backend-tester", "frontend-tester")
 _DEFAULTS = {
     "max_write_files": 3,
@@ -27,6 +38,8 @@ _DEFAULTS = {
     "max_task_chars": 1200,
     "max_context_chars": 16000,
 }
+#: A whole feature (source and its tests) is larger than one separate-tasks file.
+_FEATURE_DEFAULTS = {**_DEFAULTS, "max_write_files": 12, "max_read_files": 16, "max_task_chars": 4000}
 _GLOB_CHARS = frozenset("*?[]{}")
 _TEST_DIRS = frozenset({"test", "tests", "__tests__", "spec", "specs", "e2e"})
 _ROLE_TEXT = {
@@ -42,6 +55,14 @@ _ROLE_TEXT = {
         "edit source files: when a test exposes a defect, commit the test and report the failure "
         "with its output instead of fixing it. Do not run broad full suites."
     ),
+    "feature": (
+        "You own this {area}feature end to end in one session: read the brief, plan briefly, "
+        "implement the source, write or update its tests, and run them through your declared gate. "
+        "Do not delegate or launch sessions, and do not review your own work: an independent "
+        "reviewer checks it after you (each commit, or the whole job once, as the project sets). "
+        "Use host task_commit before the declared gate_run, "
+        "then report REVIEW with the gate output."
+    ),
 }
 
 
@@ -52,7 +73,7 @@ def _settings(project: Any) -> dict[str, Any]:
 
 
 def _limit(project: Any, key: str) -> int:
-    value = _settings(project).get(key, _DEFAULTS[key])
+    value = _settings(project).get(key, (_FEATURE_DEFAULTS if feature(project) else _DEFAULTS)[key])
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"workflow.{key} must be a positive integer, not {value!r}")
     return value
@@ -141,8 +162,51 @@ def _inexact(project: Any, path: str) -> str | None:
 
 
 def enabled(project: Any) -> bool:
-    """True only when `.ai/project.yaml` sets `workflow.mode: separate-tasks`."""
-    return _settings(project).get("mode") == _MODE
+    """True for the managed workflows: `workflow.mode: feature` or `separate-tasks`."""
+    return _settings(project).get("mode") in MODES
+
+
+def feature(project: Any) -> bool:
+    """`workflow.mode: feature`: one builder owns a feature end to end, tests included."""
+    return _settings(project).get("mode") == _FEATURE
+
+
+def default_gate(project: Any, definition: dict) -> dict:
+    """A feature builder runs its tests: a task with no named gate gets the project's full gate."""
+    if (feature(project) and not definition.get("gate_level") and definition.get("kind") != "RESEARCH"
+            and project.gate("full")):
+        return {**definition, "gate_level": "full"}
+    return definition
+
+
+def intent_text(job: dict) -> str:
+    """The job intent a managed worker receives: id, revision, every user request and acceptance."""
+    return json.dumps({"id": job["id"], "revision": job.get("revision"), "requests": job.get("requests") or [],
+                       "acceptance": job.get("acceptance") or []}, ensure_ascii=False)
+
+
+def check_intent(project: Any, job: dict) -> None:
+    """Refuse a job intent larger than managed workers accept, before it is saved."""
+    if not enabled(project):
+        return
+    size, limit = len(intent_text(job)), _limit(project, "max_context_chars")
+    if size > limit:
+        raise ValueError(f"job update refused: the job's intent would be {size:,} characters, over "
+                         f"max_context_chars {limit:,}. Keep the update short and put long logs, tracebacks "
+                         "or diagnostics in a file it names. Nothing is truncated.")
+
+
+def planning_note(project: Any) -> str:
+    """How the manager shapes the graph in feature mode; empty otherwise."""
+    if not feature(project):
+        return ""
+    return ("Workflow: feature. Plan one task per feature: a builder role (backend-builder, "
+            "frontend-builder or implementer) owns that feature's source and tests together and runs "
+            "them in its gate; do not create separate tester tasks. Give tasks that run in parallel "
+            "disjoint files; a task that needs another's output depends on it. Give each task the gate "
+            "that runs its tests (one without a gate runs the full gate); it must pass that gate, and an "
+            "independent review follows. When the whole job is one coherent change (one "
+            "module or package), plan exactly one task.")
 
 
 def validate_task(project: Any, task: Any) -> None:
@@ -161,8 +225,9 @@ def validate_task(project: Any, task: Any) -> None:
     kind = str(_field(task, "kind") or "SAFE_PARALLEL")
     writes, reads = _declared_paths(task, problems)
     read_only = kind == "RESEARCH" and not writes
-    if role not in (*_BUILDERS, *_TESTERS):
-        problems.append(f"role {role!r} is not one of {', '.join((*_BUILDERS, *_TESTERS))}")
+    builders = _FEATURE_BUILDERS if feature(project) else _BUILDERS
+    if role not in (*builders, *_TESTERS):
+        problems.append(f"role {role!r} is not one of {', '.join((*builders, *_TESTERS))}")
     if kind == "RESEARCH" and writes:
         problems.append(f"a read-only RESEARCH task may not write: {', '.join(writes)}")
     elif not writes and not read_only:
@@ -175,9 +240,9 @@ def validate_task(project: Any, task: Any) -> None:
             issue = _inexact(project, path)
             if issue:
                 problems.append(f"{label} path is {issue}, not an exact file")
-    if role in _BUILDERS:
+    if role in builders:
         tests = [path for path in writes if _is_test_file(path)]
-        if tests:
+        if tests and not feature(project):  # a feature builder writes its own tests
             problems.append(f"a builder may not write test files: {', '.join(tests)}")
         if kind == "TEST_ONLY":
             problems.append("a builder task cannot be TEST_ONLY")
@@ -206,7 +271,7 @@ def validate_task(project: Any, task: Any) -> None:
     if problems:
         name = _field(task, "spec_id") or _field(task, "id") or _field(task, "title") or "task"
         raise ValueError(
-            f"separate-tasks workflow refuses {name}: "
+            f"{_settings(project).get('mode')} workflow refuses {name}: "
             + "; ".join(problems)
             + ". Split or replan it; nothing is truncated."
         )
@@ -214,10 +279,16 @@ def validate_task(project: Any, task: Any) -> None:
 
 def role_text(project: Any, role: str) -> str | None:
     """Concise instructions for a builder or tester; None outside enabled worker roles."""
-    if not enabled(project) or role not in (*_BUILDERS, *_TESTERS):
+    if not enabled(project):
         return None
-    area, duty = role.split("-", 1)
-    return (f"## Role: {role}\n" + _ROLE_TEXT[duty].format(area=area)
+    if feature(project) and role in _FEATURE_BUILDERS:
+        text = _ROLE_TEXT["feature"].format(area=role.split("-", 1)[0] + " " if role in _BUILDERS else "")
+    elif role in (*_BUILDERS, *_TESTERS):
+        area, duty = role.split("-", 1)
+        text = _ROLE_TEXT[duty].format(area=area)
+    else:
+        return None
+    return (f"## Role: {role}\n" + text
             + " Use AgentKit MCP audit_diff for scoped inspection, task_commit for host Git "
               "commits before gate_run, and gate_run for declared checks. Never invoke Git "
               "through a worker shell, including git diff/status. This applies after provider "
@@ -239,16 +310,7 @@ def job_context(project: Any, job_id: str | None, task: Any) -> str:
     if owner and owner != job_id:
         raise ValueError(f"task belongs to job {owner!r}, not {job_id!r}")
     job = jobs.load(project.root, job_id)
-    requests = job.get("requests") or []
-    text = json.dumps(
-        {
-            "id": job["id"],
-            "revision": job.get("revision"),
-            "requests": requests,
-            "acceptance": job.get("acceptance") or [],
-        },
-        ensure_ascii=False,
-    )
+    text = intent_text(job)
     limit = _limit(project, "max_context_chars")
     if len(text) > limit:
         raise ValueError(
@@ -258,13 +320,17 @@ def job_context(project: Any, job_id: str | None, task: Any) -> str:
     return text
 
 
-def resume_token(project: Any, task: Any, same_session: bool) -> str | None:
+def resume_token(project: Any, task: Any, same_session: bool, role: str | None = None) -> str | None:
     """The provider session to resume, or None to launch fresh.
 
-    Enabled mode always launches fresh, even when retrying the same task on the
-    same model. Otherwise the existing token is reused iff `same_session`.
+    Separate-tasks always launches fresh, even when retrying the same task on the
+    same model. Feature mode and the legacy workflow reuse the existing token iff
+    `same_session`: a retried feature continues in the session that built it. The
+    manager always continues its own session: it plans once, then reads what changed.
     """
-    if enabled(project) or not same_session:
+    if not same_session:
+        return None
+    if enabled(project) and not feature(project) and role != "coordinator":
         return None
     return _field(task, "session_token")
 
@@ -283,7 +349,7 @@ def validate_gate(project: Any, task: Any, level: str) -> None:
         return
     if level != _field(task, "gate_level"):
         raise ValueError("separate-tasks workers may run only their assigned gate")
-    if _field(task, "role") in _BUILDERS:
+    if _field(task, "role") in _BUILDERS and not feature(project):
         import re
 
         test_command = re.compile(

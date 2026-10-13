@@ -22,6 +22,7 @@ CAPABILITIES = (
     "prewrite_file_guard",   # can block a file write before it lands
     "shell_guard",           # can block a shell command before it runs
     "workspace_sandbox",     # OS-enforced confinement of writes to the workspace
+    "tool_only_confinement", # no command tool; file tools refuse paths outside the lease (measured)
     "network_control",       # domain allow/deny for outbound traffic
     "resume_session",        # can continue a prior session with its context
     "fork_session",          # can branch a prior session into a new one
@@ -107,8 +108,12 @@ class CapabilitySet:
         # separate OS account all satisfy it, and an adapter reports whichever
         # it genuinely has. What is *not* acceptable is an agent that merely
         # promises to stay put.
-        confined = bool(raw.get("workspace_sandbox"))
-        strong = confined and (
+        sandboxed = bool(raw.get("workspace_sandbox"))
+        # An agent offered no command tool at all cannot run code, so its file
+        # tools' refusals are the whole boundary. That is measured separately and
+        # admits bounded writers, never hotspot, decouple or contract work (F22).
+        confined = sandboxed or bool(raw.get("tool_only_confinement"))
+        strong = sandboxed and (
             bool(raw.get("prewrite_file_guard")) or bool(raw.get("shell_guard"))
         )
         structured = bool(raw.get("mcp_stdio")) and bool(raw.get("structured_output"))
@@ -176,7 +181,7 @@ def load_cache(root: str | Path) -> dict[str, CapabilitySet]:
         return {}
     result = {name: CapabilitySet.from_dict(spec) for name, spec in entries.items()}
     for caps in result.values():
-        for name in ("workspace_sandbox", "prewrite_file_guard", "shell_guard"):
+        for name in ("workspace_sandbox", "tool_only_confinement", "prewrite_file_guard", "shell_guard"):
             note = caps.notes.get(name, "")
             if caps.has(name) and note.startswith("functional") and not note.startswith("functional v2:"):
                 caps.set(name, False, "unverified: legacy probe evidence; fresh functional probe required")
@@ -203,8 +208,8 @@ def cached_runtime_problem(root, adapter, kind: str) -> str | None:
     if install is None:
         return None
     caps = load_cache(root).get(adapter.name)
-    from .runtime_identity import identify
+    from .runtime_identity import identify, same_runtime
     identity = identify(install)
-    if not caps or caps.version != install.version or not identity["sha256"] or caps.installation != identity:
+    if not caps or caps.version != install.version or not identity["sha256"] or not same_runtime(caps.installation, identity):
         return f"{adapter.name} {install.version} requires a fresh functional confinement probe; cached runtime version differs"
     return None

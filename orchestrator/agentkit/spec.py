@@ -68,8 +68,9 @@ class TaskSpec:
             raise ValueError("complexity must be easy, standard or complex")
         if self.model_profile not in (None, "sol", "opus", "sonnet", "qwen"):
             raise ValueError("invalid worker model_profile")
-        if self.model_profile in ("sonnet", "qwen") and (self.complexity != "easy" or self.kind in ("HOTSPOT", "CONTRACT_CHANGE", "DECOUPLE")):
-            raise ValueError("Sonnet/Qwen require easy tasks without shared-contract or architectural changes")
+        from .models import small_model_fits
+        if not small_model_fits(self.model_profile, {"kind": self.kind, "complexity": self.complexity}):
+            raise ValueError("Sonnet requires easy tasks; Sonnet/Qwen never take shared-contract or architectural changes")
         if self.model_assignment is not None:
             from .policy import validate_task_shape
             if self.model_profile:

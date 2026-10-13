@@ -1,13 +1,21 @@
 # AgentKit
 
-Coordinate Claude Code and Codex workers in a separate Git repository, from a
-first runnable draft through changes to an established project.
+Coordinate Claude Code, Codex and configured local Qwen workers in a separate
+Git repository, from a first draft through changes to an established project.
 
-A **job** stores the user's request, corrections, acceptance criteria and planning
-decisions. Its **coordinator** stays on the chosen provider. The coordinator
-inspects the current repository and defines **tasks** with file ownership,
-dependencies, roles, skills and checks. A Python **supervisor** runs independently
-of agent quotas and manages workers, reviews, recovery and integration.
+A **job** stores the user's request, written in their own words with screenshots
+when they help, plus corrections, acceptance criteria and decisions. An
+**assigner** (the coordinator) inspects the repository and turns the job into
+**tasks** with file ownership, dependencies, roles, skills and checks. It plans
+once, and again only when the user changes the job. **Builders** do the tasks,
+and every task must pass its own checks. A **review** follows: per task, once per
+job, by the user, or not at all. Code accepts the finished job. A Python
+**supervisor** runs independently of agent quotas and manages workers, reviews,
+recovery and integration.
+
+When something stops, it becomes a **problem** for the user while the rest of the
+job keeps going. The cheapest reply that fixes it can come from the view, the
+terminal or a phone, by email.
 
 Documentation starts at [docs/README.md](docs/README.md). It separates current
 operating guides from historical plans, reviews and evaluation reports.
@@ -35,6 +43,10 @@ claude plugin marketplace add m-555/AgentKit
 claude plugin install agentkit@agentkit-local
 ```
 
+Or run `agentkit view`, open the **Jobs** tab and write the job there, with up to
+10 screenshots (PNG, JPEG, GIF or WebP, 8 MB each). Workers can open them through
+the read-only `job_attachment` tool.
+
 Run `agentkit --version` to verify the checkout and installed package metadata.
 For explicit model assignments, unlimited scheduling and manager recovery, see
 [the recovery guide](docs/recovery-and-model-policy.md).
@@ -49,8 +61,9 @@ leaves the operator checkout on its current branch and preserves its local edits
 Functional probing launches small real agent requests. Static `agentkit probe`
 only inspects available flags; it cannot certify filesystem confinement. Write
 workers require a successful confinement probe. An unavailable sandbox is a setup
-blocker, particularly for native Windows installations; changing a capability
-boolean does not provide isolation.
+blocker, particularly for native Windows installations, where Claude Code has no
+OS sandbox; run Claude writers in WSL. Changing a capability boolean does not
+provide isolation.
 
 Write `request.md` in product terms: desired behavior, constraints, examples,
 acceptance criteria, and what is outside scope. You can instead talk to your main
@@ -64,8 +77,29 @@ To add a correction without losing the original request:
 agentkit job update first-draft --request-file correction.md
 ```
 
-The revision changes and new task launches and merges wait for coordinator
-replanning. Existing worker results remain available for inspection.
+The revision changes, and new task launches and merges wait until the assigner
+has re-planned. Existing worker results remain available for inspection.
+
+## Workflow and review
+
+`agentkit init` writes this for a new project:
+
+```yaml
+workflow:
+  mode: feature
+  review: once
+```
+
+| Setting | Choices |
+|---|---|
+| `workflow.mode` | `feature` (new projects): one builder owns a feature, writes and runs its tests, and resumes its own session on a retry. `separate-tasks`: fresh builders and separate testers ([efficient workflow](docs/efficient-workflow.md)). Omitted: legacy mode, where the coordinator also manages each stop. |
+| `workflow.review` | `once` (new projects): one AI review of the whole job after its tasks pass their checks and merge. `ai`: every task is reviewed. `off`: the checks decide. `human`: you review. |
+
+`once`, `off` and `human` need a `workflow.mode`; a project without one reviews
+every task. Review findings go back to the same builder up to 3 times without
+waking the assigner. Switching between `ai`, `once` and `off` keeps running jobs
+going; switching to or from `human` blocks them. See
+[review workflows](docs/review-workflows.md).
 
 ## Define work
 
@@ -106,33 +140,42 @@ to instruction files in `.ai/project.yaml`. Unknown task kinds, invalid paths,
 dependency cycles and undefined gates are rejected.
 
 The coordinator may use `project_configure` to set real gates, setup commands,
-contracts and hotspots after inspecting the project. Both a task gate and a
-`full` gate are required. Checks must terminate without changing committed files.
+contracts and hotspots after inspecting the project. Under a workflow it cannot
+rewrite settings the user already configured. Both a task gate and a `full` gate
+are required; in feature mode a builder task with no named gate runs the `full`
+gate. Checks must terminate without changing committed files.
 [Setup profiles](docs/workspaces-and-environments.md) prepare only required tools
 and reuse private npm snapshots or cached Python wheels. Legacy `worktree_setup`
 builds private environments; `.venv` and `node_modules` are never
 shared. On an empty project, avoid setup commands requiring manifests that the
 first worker has yet to create.
-
 ## Model policy
 
 | Role / worker preference | Model | Effort |
 |---|---|---|
-| Coordinator and reviewer | GPT-6 Astra; fallback Claude Opus 5.5 | high |
+| Coordinator and reviewer | GPT-6.1 Sol; fallback Claude Opus 5.5 | high |
 | Worker 1 (default) | GPT-6.1 Sol | high |
 | Worker 2 (preferred fallback) | Claude Opus 5.5 | high |
 | Worker 3 (easy tasks only) | Claude Sonnet 5 | high |
-| Worker 4 (explicit easy research assignment) | Local Qwen 3.8 | local default |
+| Worker 4 (explicit bounded assignment) | Local Qwen 3.8 | local default |
 
 This order is your configured preference, not a measured benchmark. The scheduler
 also checks task complexity, runtime capabilities, model access and account quota.
-The coordinator can set `complexity: easy` and `model_profile: qwen` (or `sonnet`)
-on bounded tasks. Standard and complex work stays with Sol or Opus. A failed
-small-model attempt is promoted to a preferred worker. One local GPU worker runs
-at a time. Qwen is currently limited to `RESEARCH`: OpenCode tool permissions do
-not establish the filesystem isolation required for unattended source edits.
+Control roles (coordinator and reviewer) accept only Sol or Opus.
+Sonnet requires `complexity: easy`. Explicit Qwen assignments accept standard
+and complex tasks on the same complexity scale as Codex and Claude. Assignment
+roles can restrict Qwen to backend work and reject frontend tasks. Qwen supports
+research and bounded source/test tasks after measured tool confinement passes;
+high-risk task kinds still require stronger filesystem isolation. When the user
+wants to measure Qwen on one HOTSPOT task anyway, the attached manager records
+that decision with `agentkit manager local-trial <job> --task N --evidence-file F`;
+Qwen then runs it as a confined bounded writer, the task keeps its HOTSPOT lease,
+review and gate, and the approval lapses if the task's spec changes. Decouple
+and contract work are never eligible. Complexity
+and confinement are separate checks. One local GPU worker runs at a time.
+Explicit assignments switch models only through approved fallbacks.
 
-New jobs default to automatic initial selection: Astra, then Opus at high. Once
+New jobs default to automatic initial selection: Sol, then Opus at high. Once
 the coordinator starts working, its exact provider, model and effort are pinned
 in durable job memory. Quota exhaustion waits for that coordinator; eligible
 workers and independent reviewers continue. An explicit `--coordinator codex`
@@ -146,8 +189,9 @@ Use `model_policy.roles` for exact coordinator/reviewer pins and named
 fallbacks. A task opts in with `model_assignment`; explicit choices do not silently
 upgrade or switch provider. See [the complete example](docs/recovery-and-model-policy.md).
 
-Profile settings support `model`, `effort` and `enabled`; control effort stays
-`xhigh`, and edits do not change an already pinned coordinator.
+Profile settings support `model`, `effort` and `enabled`. Default control effort
+is `high`; exact role assignments can also pin Sol coordinators and reviewers.
+Edits do not change an already pinned coordinator.
 
 The catalog was verified on 2026-09-30: workers now use `gpt-6.1-sol` and
 `claude-opus-5-5`. Existing project defaults naming `gpt-5.6-sol`, `gpt-6-sol`
@@ -162,7 +206,7 @@ and [Opus 5.5 model documentation](https://platform.claude.com/docs/en/models/op
 
 The local adapter reads only the `local` provider from a sibling `local-opencode`
 repository's `opencode.json`. Set `AGENTKIT_LOCAL_OPENCODE` to that repository's
-path when installed elsewhere. It uses `local/qwen3.8-27b-q8-tuber` and requires
+path when installed elsewhere. It uses the configured local model and requires
 your existing router to be running on `127.0.0.1`. It does not modify the local
 repository, load its coordinator workflow, or start another GPU model server.
 Use `agentkit providers check` for runtime availability and `agentkit probe` for
@@ -181,15 +225,16 @@ the ignored `.test-artifacts` directory; this does not run during ordinary tests
 ## Automatic lifecycle and quota recovery
 
 ```text
-User request -> pinned coordinator -> saved task graph
-  -> isolated workers -> task checks -> independent review of exact commit
-  -> integration worktree -> combined full checks -> coordinator job acceptance
+User request -> assigner plans once -> saved task graph
+  -> isolated builders -> task checks -> review (per task, once per job, off or human)
+  -> integration worktree -> combined full checks -> code accepts the job
 ```
 
 The supervisor records process ownership, session IDs, generations, heartbeats,
 checkpoints and redacted event logs. Closing the initiating agent session does
-not close the background supervisor. Restart it with `agentkit job start` after
-a machine restart; OS login/startup service installation is not included.
+not close the background supervisor. Use `agentkit service autostart` for optional
+Windows logon recovery, or restart it with `agentkit job start` after a machine
+restart. Automatic host startup requires that explicit configuration.
 
 Provider availability is shared by account. Five-hour and weekly windows are
 stored separately when supplied. Codex uses documented app-server account quota
@@ -220,52 +265,128 @@ integration and new dependent launches continue. An attached external manager
 requires a live bridge and lease; confirmed bridge termination permits a CLI
 replacement on the same pin. This does not wake the original native chat.
 
-If the pinned manager's account stays unavailable, the user can appoint another
-control profile with `agentkit manager repin JOB --profile NAME --evidence-file
-decision.md`. It is refused while the old manager's lease is fresh or a session
-still owns the job. It records the decision in the job and opens a new recovery
-epoch that the new manager must audit and acknowledge. `agentkit manager handover
-JOB --holder NAME --pid PID` moves an attached manager lease to the user's next
-chat session on the same pin; the previous credential stops working.
-
 Quota waits do not use task failure attempts or ask the human to intervene.
 Authentication problems and genuinely missing product decisions remain explicit
-blockers. Repeated task failures return to the coordinator for inspection.
+blockers. Under a workflow, a task that stays stopped after its automatic retries
+becomes a problem for the user (next section); in legacy mode it returns to the
+coordinator.
 
-An independent PASS applies only to the exact clean worker commit. Integration
+With qualified providers, declared gates and permitted model assignments, the
+coordinator and supervisor can plan, build, review, integrate and recover without
+a human approving each task. The coordinator supplies task complexity metadata;
+this is not a calibrated complexity classifier. Live quota-reset reliability
+requires observed recovery evidence as well as the automated regression tests.
+
+Under `review: ai`, an independent PASS applies only to the exact clean worker
+commit; under `once` and `off`, a task's passing gate approves it. Integration
 audits scope, merges that commit in a dedicated checkout, runs the combined full
 gate, and rolls back a failed merge. Contract changes freeze a version before
-dependent work starts. The job becomes DONE only after coordinator acceptance
-and another passing combined gate.
+dependent work starts. With a workflow, code accepts the finished job after
+another passing combined gate and, under `once`, a passing review of the combined
+change. In legacy mode the coordinator accepts it.
 
 **Automated merges target the integration branch**, not protected branches such
 as `main` or `master`. This preserves the repository's existing publication boundary.
+## When something stops
+
+Automatic retries come first: review findings go back to the builder up to 3
+times, and a failed gate or a crash is retried once. A provider's usage limit is
+never a problem; the task resumes when the provider is back. A reviewer that
+could not review, a builder reporting a tool or setup failure, or an unchanged
+resubmission stops the task instead of re-running builders.
+
+What the retries cannot fix becomes a **problem**: code records what happened and
+which replies can fix it, with a six-letter code. Tasks that do not depend on the
+stopped one keep running and merging. The same setup problem in two tasks of one
+job holds that job until you retry one of them, so no tokens are spent on
+sessions that would fail the same way.
+
+| Reply | What it does | Tokens |
+|---|---|---|
+| `retry` | Runs the stopped step again, after you fixed the cause | Only the rerun |
+| `accept` | Takes the builder's reviewed commit; its checks must still pass | None |
+| `skip` | Cancels the task and every task that depends on it | None |
+| `dismiss` | Closes a request for more files; the task keeps its scope | None |
+| `hint <words>` | The same builder continues its own session with your words | One builder turn |
+| `plan <words>` | The assigner re-plans the job with your words | One planning session |
+
+Answer in the view's **Jobs** tab, from the terminal (`agentkit problem list`,
+`agentkit problem act CODE retry`), or by email. Turn email on in
+**Settings > Phone (email)** with a separate mailbox and an app password; the
+password is encrypted for your Windows user (DPAPI), or read from
+`AGENTKIT_PHONE_PASSWORD` elsewhere, and never shown or logged. Each new problem
+sends one email. A reply is obeyed only from your own address, with a DKIM or SPF
+pass, carrying an open problem's code. `status`, `pause` and `resume` also work.
+SMS is designed but not built. See
+[when something stops](docs/problems-and-phone.md).
+
+## Token use
+
+Sessions start lean. Codex runs without sub-agents, plugins, apps or the skill
+catalog, and Claude without slash commands or dynamic system-prompt sections.
+Briefs are capped at 4,000 characters, and plain reads can be batched in one
+turn. The assigner wakes only for a new job revision or a decision, and resumes
+its own session with a short digest of what changed; past 600,000 input tokens in
+its last session it starts fresh from the compact brief instead. Review prompts
+shrink to fit the model's context. `budgets.job_tokens` in `.ai/project.yaml`
+optionally caps a job's recorded tokens: over it, nothing new launches and the
+work so far is kept.
+
+Managed work still costs more tokens than one session. On 2026-10-12, on a small
+project with 40 acceptance cases, one solo Sonnet 5.5 session used about 100,000
+tokens and AgentKit with `review: once` and Sonnet in every role about 577,000
+(5.7 times as many); both passed all 40. An earlier Sol run with per-task review
+used 13.7 times the solo tokens and did not finish; see
+[the benchmark](docs/evaluations/AGENTKIT_BENCHMARK_2026-10-12.md) and
+[the efficiency audit](docs/evaluations/AGENTKIT_EFFICIENCY_AUDIT_2026-10-12.md).
 
 ## Operate and inspect
 
 ```sh
+agentkit view                          # every repository: jobs, problems, settings
 agentkit run --watch --max-workers 2   # foreground alternative
-agentkit live --follow               # redacted agent and manager activity
+agentkit live --follow                 # redacted agent and manager activity
 agentkit status
+agentkit problem list                  # what waits for you
+agentkit problem act CODE retry        # answer a problem
+agentkit task retry 7                  # resume a task stopped on a setup problem
 agentkit providers status
 agentkit providers check
 agentkit events --task 7
 agentkit why merge-failed 7
 agentkit integrate                     # manually process approved merge queue
-agentkit usage                         # project-wide recorded tokens; calls no model
-agentkit recovery status               # pending recovery and wake intents
-python -m agentkit.dashboard --root . --open   # local web dashboard, read-only by default
 ```
 
-The dashboard's **Live agent screens** mirror registered Windows console windows.
-[Live monitor](docs/live-monitor.md) covers project usage totals and opt-in line
-input to an interactive CLI manager (`agentkit terminal register-manager`).
+### One view for every repository
+
+`agentkit view` opens one local page for every repository that uses AgentKit:
+those where `agentkit init`, `agentkit view` or `agentkit service start` ran, and
+their sibling folders that already have `.ai/project.yaml` (task worktrees are
+left out). It works from any folder, so after a restart run `agentkit view`, pick
+the repository at the top, review its **Settings** tab and press **Start**.
+
+The **Jobs** tab is where you write a job, add screenshots, change a job, and
+answer its problems. Other tabs show the manager, agents, sessions and tasks,
+usage, reviews and setup.
+
+Settings holds every choice the manager makes: the manager and reviewer model and
+effort, the workflow and review choice, each worker assignment's model and effort,
+worker slots and maximum workers, a job token budget, which models may launch,
+agent windows and turn limit. They save only while that repository is stopped; a
+new manager re-pins its unfinished jobs through `agentkit manager repin`, which
+waits while a chat manager holds a fresh lease. Provider hold/clear, the local
+router's Qwen thinking switch and the phone email settings work at any time. The
+phone settings serve every repository. Start lifts `execution_paused` and starts
+the background service; Stop ends it, and sessions already running finish on
+their own. The list of repositories lives in `~/.agentkit/projects.json` (or
+`AGENTKIT_HOME`).
 
 Commit `.ai/project.yaml`, `.ai/tasks.yaml`, `.ai/jobs/*.json` and project skills
-as project records. SQLite runtime state, quota windows and process logs live
-under `.ai/` and are ignored by Git. Preserve runtime state to preserve approvals
-and sessions. A rebuild from Git alone requires re-auditing recovered branches;
-it cannot reconstruct missing approval evidence or prove process ownership.
+as project records. SQLite runtime state, quota windows, process logs and job
+screenshots live under `.ai/` and are ignored by Git. Preserve runtime state to
+preserve approvals and sessions. A rebuild from Git alone requires re-auditing
+recovered branches; it cannot reconstruct missing approval evidence or prove
+process ownership.
 
 The supervisor log is `.ai/runtime/supervisor.log`; individual agent streams are
 `.ai/runtime/process-<id>/events.jsonl`. `agentkit run --dry-run` avoids provider
@@ -289,62 +410,6 @@ confinement against writes into other worktrees.
 
 See [GLOSSARY.md](docs/GLOSSARY.md) for terminology and [PLAN_V3.md](docs/plans/PLAN_V3.md) for the
 historical design rationale. This README describes the current supervised workflow.
-
-Use the configurable [separate-task workflow](docs/efficient-workflow.md) for
-fresh-session builders and independent testers. Existing projects retain legacy
-behavior until the operator enables this mode and replans incompatible tasks.
-The localhost Team setup exports explicit effort choices for a reviewed profile;
-selecting a value does not change a running session or an existing manager pin.
-
-## Human or AI review
-
-[Review workflows](docs/review-workflows.md) document the two selectable policies,
-one planner/manager, structured user job files, automatic tester handoffs, bounded
-fresh worker sessions, role model/effort choices and local human approval controls.
-The dashboard is read-only by default; operator controls save decisions and idle
-project settings without starting AI jobs.
-
-## Recent changes
-
-Since 2026-10-04:
-
-**Features**
-
-- **Manager re-pin and handover:** `agentkit manager repin` and `agentkit manager handover`
-  (see [automatic lifecycle](#automatic-lifecycle-and-quota-recovery)).
-- **Project usage:** `agentkit usage` totals the recorded tokens of every launch without
-  calling a model; `--backfill` saves receipts from older stopped logs.
-- **Live agent screens:** the dashboard mirrors registered Windows console windows, and an
-  interactive CLI manager can opt into one-line input.
-- **Shared recovery and wake:** durable recovery intents for CLI and editor managers,
-  inspected with `agentkit recovery status|capabilities|cancel` and shown in the dashboard.
-- **Preserved failing tests:** a manager can hold an independent failing test with
-  `test_hold`; once the source fix is accepted, `test_refresh` carries the byte-identical
-  test forward instead of paying another session to rewrite it.
-- **Bounded manager queries:** `job_brief` pages job history to keep manager context small
-  ([manager efficiency](docs/operations/manager-query-efficiency.md)).
-- **Private browser checks:** Playwright gates test the assigned worktree through its own
-  server and port ([browser checks](docs/browser-checks.md)).
-
-**Fixes**
-
-- A session launched for one task can read only that task's brief.
-- Local Qwen workers read only the files their task declares; glob, grep and directory
-  listings are denied.
-- A local worker's standing task rules survive context compaction, and worker prompts
-  state that the host normalizes line endings.
-- Every worker provider commits through the host's `task_commit` tool.
-- A monitor-side fault, such as a locked database during a heartbeat, no longer stops a
-  healthy worker or uses one of its attempts.
-- Recovery evidence and Git merges are gathered outside database write transactions, so
-  other writers no longer time out on large projects.
-- Operator leases stay alive across supervisor passes.
-- A retry whose stopped attempt preserved nothing starts fresh instead of receiving a
-  continuation packet.
-- Windows process checks use complete PID snapshots and process identity, so a recycled
-  PID is not mistaken for a live worker.
-- Quota recovery handles manual resets, fences stale native returns and retries confirmed
-  capacity failures after the quota wakes.
 
 ## License
 

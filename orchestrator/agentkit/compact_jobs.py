@@ -23,6 +23,10 @@ def summary(conn, root, job_id: str, *, offset=0, limit=20) -> dict:
     """Read a page of unfinished work, never nested recovery/audit/checkpoint history."""
     _page(offset, limit)
     job = jobs.load(root, job_id)
+    from .config import load_project
+    from .models import catalog
+    from .policy import describe
+    project = load_project(root)
     tasks = [t for t in db.list_tasks(conn) if t.get('job_id') == job_id]
     pending = [t for t in tasks if t['status'] not in ('DONE', 'CANCELLED')]
     pending.sort(key=lambda t: t['id'])
@@ -38,6 +42,11 @@ def summary(conn, root, job_id: str, *, offset=0, limit=20) -> dict:
             'blocker': _preview(task.get('blocker'))})
     return {
         'id': job['id'], 'revision': job['revision'],
+        'coordinator': job.get('coordinator'),
+        'coordinator_model': job.get('coordinator_model'),
+        'reviewers': job.get('reviewers') or [],
+        'workflow_review': job.get('workflow_review'),
+        'model_policy': catalog(project), 'model_pins': describe(project),
         'requests': job.get('requests') or [],  # User intent is never truncated.
         'acceptance': job.get('acceptance') or [],
         'decisions': [{'at': item.get('at'), **_preview(item.get('text'))}

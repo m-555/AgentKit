@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ProjectConfig
+from .gate_excerpt import failure_excerpt
 
 DEFAULT_TIMEOUT = 1800
 _TAIL = 4000
@@ -26,6 +27,7 @@ class CommandResult:
     exit_code: int
     duration_s: float
     output_tail: str
+    failure_excerpt: str = ""  # why it failed, taken from the full output (F15)
 
     @property
     def ok(self) -> bool:
@@ -51,6 +53,7 @@ class GateResult:
                     "duration_s": round(r.duration_s, 1),
                     "ok": r.ok,
                     "output_tail": r.output_tail,
+                    "failure_excerpt": r.failure_excerpt,
                 }
                 for r in self.results
             ],
@@ -65,7 +68,11 @@ class GateResult:
         lines = [f"gate `{self.level}` FAILED"]
         for r in failed:
             lines.append(f"  $ {r.command}  -> exit {r.exit_code}")
-            tail = r.output_tail.strip().splitlines()[-25:]
+            if r.failure_excerpt:
+                lines.append("    failure lines:")
+                lines.extend(f"      {line}" for line in r.failure_excerpt.splitlines())
+                lines.append("    output tail:")
+            tail = r.output_tail.strip().splitlines()[-(12 if r.failure_excerpt else 25):]
             lines.extend(f"    {line}" for line in tail)
         return "\n".join(lines)
 
@@ -98,6 +105,7 @@ def _run_one(command: str, cwd: Path, timeout: int, *, env=None) -> CommandResul
         exit_code=code,
         duration_s=time.monotonic() - started,
         output_tail=combined[-_TAIL:],
+        failure_excerpt="" if code == 0 else failure_excerpt(combined),
     )
 
 

@@ -82,6 +82,6 @@ def test_role_cap_does_not_leave_frontend_slot_empty(conn, project, monkeypatch)
 
 def test_worker_packet_explains_supported_reads_without_weakening_guard():
     from agentkit.scheduler import WORKER_PROMPT
-    assert "Get-Content -LiteralPath PATH" in WORKER_PROMPT
-    assert "Never combine reads" in WORKER_PROMPT
+    assert "Get-Content -LiteralPath a; Get-Content -LiteralPath b" in WORKER_PROMPT
+    assert "Pipelines, redirection and expansions are refused" in WORKER_PROMPT
     assert "Skills are already included" in WORKER_PROMPT

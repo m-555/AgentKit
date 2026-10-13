@@ -40,8 +40,11 @@ def test_cli_generation_drift_refuses_continuation(conn, project_root, make_task
     task, row=parked(conn, project_root, make_task)
     db.bump_generation(conn,task)
     db.bump_generation(conn,task)
-    with pytest.raises(ValueError,match="not ready"):
-        recovery_runtime.before_launch(conn,project_root,purpose="worker",provider="codex",task_id=task)
+    # The parked turn is never continued: no recovery claim, and the cancellation
+    # persists even inside the launch transaction (F27), so the scheduler's own
+    # guards launch the task fresh instead of refusing it forever.
+    with db.immediate_transaction(conn):
+        assert recovery_runtime.before_launch(conn,project_root,purpose="worker",provider="codex",task_id=task) is None
     assert store.get(conn,row["id"])["state"] == "CANCELLED"
 
 

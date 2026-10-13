@@ -17,6 +17,8 @@
     for (const [value, label] of [
       [usage.recorded_tokens, usage.complete ? "Recorded project tokens" : "Recorded tokens (partial coverage)"],
       [usage.normalized_input_tokens, "Input including cache, counted once"],
+      [usage.cost_weighted_input_tokens, "Input, cost-weighted (cache reads x0.1, writes x1.25; estimate)"],
+      [usage.average_input_per_launch, "Average input per launch"],
       [usage.counters?.output_tokens, "Output including thinking"],
       [usage.counters?.thinking_tokens, "Reported thinking (within output)"]
     ]) {
@@ -32,7 +34,9 @@
     breakdown.replaceChildren();
     for (const row of [...(usage.providers || []), ...(usage.roles || [])]) {
       const card = node("article", null, "card");
-      card.append(node("h3", row.provider || row.role), node("p", number(row.recorded_tokens) + " recorded tokens"));
+      card.append(node("h3", row.provider || row.role), node("p", number(row.recorded_tokens) + " recorded tokens"),
+        node("p", "Cost-weighted input: " + number(row.cost_weighted_input_tokens)),
+        node("p", "Average input per launch: " + number(row.average_input_per_launch)));
       for (const [key, label] of [["input_tokens","Reported input"],["output_tokens","Output including thinking"],
         ["thinking_tokens","Thinking within output"],["cached_input_tokens","Cache reads"],
         ["cache_write_input_tokens","Cache writes"]]) {

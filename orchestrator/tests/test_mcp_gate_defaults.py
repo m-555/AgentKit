@@ -54,3 +54,38 @@ def test_omitted_level_outside_task_preserves_fast(project_root, monkeypatch):
     monkeypatch.setattr(mcp_server.gates, "run_gate", run)
     mcp_server.gate_run()
     assert seen == ["fast"]
+
+
+def test_manager_can_run_additional_gate_for_task(conn, project_root, monkeypatch):
+    task_id = setup_task(conn, project_root, monkeypatch)
+    monkeypatch.delenv("AGENTKIT_TASK")
+    monkeypatch.delenv("AGENTKIT_GENERATION")
+    monkeypatch.setenv("AGENTKIT_ROLE", "coordinator")
+    monkeypatch.chdir(project_root)
+    seen = []
+    authority = []
+    monkeypatch.setattr(mcp_server, "_require_planner", lambda job: authority.append(job))
+    def run(project, level, **kwargs):
+        seen.append((level, kwargs["cwd"]))
+        return gates.GateResult(level, True)
+    monkeypatch.setattr(mcp_server.gates, "run_gate", run)
+    mcp_server.gate_run(level="fast", task_id=task_id)
+    assert authority == [None]
+    assert seen == [("fast", str(project_root))]
+    assert conn.execute("SELECT level FROM gate_results WHERE task_id=?", (task_id,)).fetchone()[0] == "fast"
+
+
+def test_additional_manager_gate_requires_authority_before_execution(conn, project_root, monkeypatch):
+    task_id = setup_task(conn, project_root, monkeypatch)
+    monkeypatch.delenv("AGENTKIT_TASK")
+    monkeypatch.delenv("AGENTKIT_GENERATION")
+    monkeypatch.setenv("AGENTKIT_ROLE", "coordinator")
+    monkeypatch.chdir(project_root)
+    def deny(job):
+        raise PermissionError("manager lease does not authorize this caller")
+    def forbidden(*args, **kwargs):
+        pytest.fail("unauthorized additional gate must not execute")
+    monkeypatch.setattr(mcp_server, "_require_planner", deny)
+    monkeypatch.setattr(mcp_server.gates, "run_gate", forbidden)
+    with pytest.raises(PermissionError, match="manager lease"):
+        mcp_server.gate_run(level="fast", task_id=task_id)

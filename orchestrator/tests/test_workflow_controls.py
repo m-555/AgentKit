@@ -176,7 +176,7 @@ def test_invalid_caps_and_unknown_review_mode_are_refused(project_root):
         with pytest.raises(ValueError):
             workflow_setup.worker_slots(project)
     project.raw["workflow"] = {"mode": "separate-tasks", "review": "manager"}
-    with pytest.raises(ValueError, match="human or ai"):
+    with pytest.raises(ValueError, match="ai, once, off or human"):
         review_policy.mode(project)
 
 

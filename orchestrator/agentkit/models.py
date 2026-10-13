@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from . import db, processes, providers
+from .local_trial import BOUNDED_KIND, granted
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,24 @@ PROFILES = {
     "sonnet": Profile("sonnet", "claude-code", "claude-sonnet-5", "high", 3),
     "qwen": Profile("qwen", "local-opencode", "local/qwen3.8-27b-q8-tuber", None, 4),
 }
-CONTROL = ("astra", "opus")
+#: Ranked control defaults and the profiles an operator may re-pin a manager to.
+#: Astra stays in the catalog but takes no AgentKit role (user decision 2026-10-12).
+CONTROL = ("sol", "opus")
 HIGH_RISK = ("HOTSPOT", "CONTRACT_CHANGE", "DECOUPLE")
+#: What a local Qwen worker may run: read-only research, or a bounded writer under
+#: measured tool-only confinement. High-risk kinds need an OS-sandboxed worker (F22).
+QWEN_KINDS = ("RESEARCH", "SAFE_PARALLEL", "DEPENDENT", "TEST_ONLY")
+
+
+def small_model_fits(name: str | None, task: dict) -> bool:
+    """Sonnet takes easy work only. Qwen takes any complexity the manager assigns: the user
+    asked to try it on normal tasks (2026-10-10). Neither takes a high-risk kind, except Qwen
+    on a HOTSPOT the user approved for a local trial (F35)."""
+    if name not in ("sonnet", "qwen"):
+        return True
+    if task.get("kind") in HIGH_RISK:
+        return name == "qwen" and granted(task)
+    return name == "qwen" or task.get("complexity", "standard") == "easy"
 VERIFIED_AT = "2026-09-30"
 # Approved upgrades only: model discovery must never silently choose another tier.
 # Explicit project pins and a job's persisted coordinator bypass these upgrades.
@@ -43,7 +60,7 @@ def profile(project, name: str, *, control=False) -> Profile:
     if not settings.get("pinned", False) and result.model in SUPERSEDED.get(name, ()):
         result = replace(result, model=PROFILES[name].model)
     if control and name not in CONTROL:
-        raise ValueError("only Astra or Opus may coordinate or approve work")
+        raise ValueError("only Sol or Opus may coordinate or approve work")
     if result.model == "gpt-6.1-sol" and result.effort not in ("low", "medium", "high", "xhigh", "max"):
         raise ValueError("GPT-6.1 Sol requires low, medium, high, xhigh or max effort; none/minimal are unsupported")
     return result
@@ -84,8 +101,8 @@ def worker_candidates(project, task, trigger=None):
     if requested:
         if requested == "astra" or requested not in PROFILES:
             raise ValueError("worker profile must be sol, opus, sonnet or qwen")
-        if requested in ("sonnet", "qwen") and not easy:
-            raise ValueError("Sonnet and Qwen require an easy task without a high-risk kind")
+        if not small_model_fits(requested, task):
+            raise ValueError("Sonnet requires an easy task; Sonnet and Qwen never take a high-risk kind")
         if requested not in ("sonnet", "qwen") or not task.get("attempts", 0):
             names = [requested, *[name for name in names if name != requested]]
     return [profile(project, name) for name in names if enabled(project, name)]
@@ -129,11 +146,14 @@ def choose_worker(conn, project, task, capabilities, *, unavailable=None):
     waiting = False
     pinned = policy.for_task(project, task) is not None
     for candidate in allowed_workers(conn, project, task):
-        if candidate.provider == "local-opencode" and task["kind"] != "RESEARCH":
-            reasons.append("qwen: read-only research until filesystem isolation is implemented")
+        trial = candidate.provider == "local-opencode" and granted(task)
+        if candidate.provider == "local-opencode" and task["kind"] not in QWEN_KINDS and not trial:
+            # Writers are admitted only by measured tool-only confinement (F22), checked next.
+            reasons.append("qwen: runs research and bounded SAFE_PARALLEL, DEPENDENT or TEST_ONLY tasks only")
             continue
         caps = capabilities.get(candidate.provider)
-        if not caps or not caps.can_run(task["kind"]):
+        # A local trial (F35) is measured as the bounded writer it runs as, never as sandboxed work.
+        if not caps or not caps.can_run(BOUNDED_KIND if trial else task["kind"]):
             reasons.append(f"{candidate.name}: runtime lacks measured capabilities for {task['kind']}")
             continue
         if pinned and _rejected(conn, candidate):
@@ -166,7 +186,7 @@ def control_candidates(project, job, purpose):
         if explicit.primary.provider not in providers_allowed:
             raise ValueError(f"model_policy.roles.{role_name} uses {explicit.primary.provider}, but job "
                              f"{job['id']} allows {', '.join(providers_allowed) or 'no provider'} for that role")
-        # Exactly the configured model; never the legacy Astra/Opus list.
+        # Exactly the configured model; never the default Sol/Opus list.
         return [explicit.primary]
     return [profile(project, name, control=True) for name in CONTROL
             if PROFILES[name].provider in providers_allowed]
@@ -181,7 +201,7 @@ def for_launch(project, task, provider, role):
             raise ValueError("selected model belongs to a different runtime")
         if role in ("coordinator", "reviewer") and not policy.control_allowed(project, role, selected, pinned):
             raise ValueError("control roles require the job's persisted coordinator pin, the exact "
-                             "model_policy.roles entry, or (with neither) Astra or Opus at configured effort (default high)")
+                             "model_policy.roles entry, or (with neither) Sol or Opus at configured effort (default high)")
         return selected
     if role in ("coordinator", "reviewer"):
         explicit = None if pinned else policy.role(project, role)

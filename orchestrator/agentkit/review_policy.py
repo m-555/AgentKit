@@ -1,4 +1,11 @@
-"""Two review choices. Mechanical staging is never a human/product verdict."""
+"""Review choices: every task (ai), once per job (once), tests only (off), or the user (human).
+
+`ai` sends each finished task to an independent AI reviewer. `once` and `off` let a
+task's passing gate approve it for merging (GATE_REVIEWER); `once` then reviews the
+combined result of the whole job one time before code accepts it (job_acceptance),
+and `off` accepts on the combined checks alone. Mechanical approval is never a
+human or product verdict.
+"""
 from __future__ import annotations
 
 from . import (
@@ -15,21 +22,46 @@ from . import (
 from .locking import exclusive
 
 STAGING_REVIEWER = "automation:human-staging"
+#: A task approved by its passing gate alone, under review `once` or `off`.
+GATE_REVIEWER = "automation:gate"
+MODES = ("ai", "once", "off", "human")
 
 
 def mode(project):
     section = project.raw.get("workflow") or {}
     value = section.get("review", "ai")
-    if value not in ("human", "ai"):
-        raise ValueError("workflow.review must be human or ai")
-    if value == "human" and not workflow.enabled(project):
-        raise ValueError("human review requires workflow.mode: separate-tasks")
+    if value not in MODES:
+        raise ValueError("workflow.review must be ai, once, off or human")
+    if value != "ai" and not workflow.enabled(project):
+        raise ValueError(f"{value} review requires workflow.mode: feature or separate-tasks")
     return value
 
 
+def pass_gate(conn, project, task):
+    """Review `once` or `off`: the task's passing gate approves it for merging; no AI reads it now."""
+    if mode(project) not in ("once", "off"):
+        raise PermissionError("gate approval is available only when the project reviews once per job or not at all")
+    if not task.get("job_id"):
+        raise ValueError("gate approval requires a planned job")
+    if any(process["task_id"] == task["id"] for process in processes.owning(conn)):
+        raise ValueError("task still has a live or uncertain process owner")
+    manager_state.require_clear(conn, task["job_id"])
+    runtime = conn.execute("SELECT * FROM jobs WHERE id=?", (task["job_id"],)).fetchone()
+    job = jobs.load(project.root, task["job_id"])
+    if not runtime or runtime["status"] != "ACTIVE" or runtime["planned_revision"] != job["revision"]:
+        raise ValueError("gate approval awaits the current authorized task graph")
+    workflow.validate_task(project, task)
+    pre = integrator.verify(conn, project, task)
+    if not pre.ok:
+        raise ValueError(pre.detail)
+    head = repo.head_commit(task["worktree"])
+    reviews.approve(conn, project, task["id"], head, "PASS", GATE_REVIEWER,
+                    f"Task gate passed at {head[:12]}; review is {mode(project)}, so no AI reviewed this task alone.")
+
+
 def validate_graph(project, tasks):
-    if mode(project) != "human":
-        return
+    if mode(project) != "human" or workflow.feature(project):
+        return  # a feature builder writes and runs its own tests
     for builder in tasks:
         if builder["status"] == "CANCELLED" or builder["kind"] == "RESEARCH":
             continue

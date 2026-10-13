@@ -15,8 +15,28 @@ def _empty() -> dict:
     return {"launches": 0, "reported_launches": 0, "complete_launches": 0,
             "partial_launches": 0, "missing_launches": 0,
             "recorded_tokens": None, "normalized_input_tokens": None,
+            "cost_weighted_input_tokens": None, "average_input_per_launch": None,
             "counters": dict.fromkeys(FIELDS),
             "reported_counts": dict.fromkeys(FIELDS, 0)}
+
+
+#: Price ratios to fresh input (Anthropic's: cache reads 0.1, cache writes 1.25). Codex's
+#: cached share is weighted the same way; the dashboard labels the figure as an estimate.
+CACHE_READ_WEIGHT = 0.10
+CACHE_WRITE_WEIGHT = 1.25
+
+
+def _cost_weighted(values: dict, provider: str) -> int:
+    """Input at what it costs relative to fresh input (token efficiency #5)."""
+    fresh, cached = values["input_tokens"] or 0, values["cached_input_tokens"] or 0
+    if provider == "local-opencode":
+        # Local input excludes cache. Unit token weight, no cloud price discount;
+        # this is recorded work, never an estimate of local monetary cost.
+        return fresh + cached + (values["cache_write_input_tokens"] or 0)
+    if provider == "claude-code":  # Claude reports input without its cache
+        writes = values["cache_write_input_tokens"] or 0
+        return round(fresh + cached * CACHE_READ_WEIGHT + writes * CACHE_WRITE_WEIGHT)
+    return round(max(fresh - cached, 0) + cached * CACHE_READ_WEIGHT)  # Codex input includes its cache
 
 
 def _add(total: dict, usage: dict, provider: str) -> None:
@@ -26,12 +46,12 @@ def _add(total: dict, usage: dict, provider: str) -> None:
     reported = any(value is not None for value in values.values())
     total["reported_launches"] += int(reported)
     total["missing_launches"] += int(not reported)
-    # Claude input excludes cache reads/writes. Codex already includes its cache.
+    # Claude/OpenCode input excludes cache reads/writes. Codex includes its cache.
     keys = ["input_tokens"]
-    if provider == "claude-code":
+    if provider in ("claude-code", "local-opencode"):
         keys.extend(("cached_input_tokens", "cache_write_input_tokens"))
     inputs = [values[key] for key in keys]
-    supported = provider in ("claude-code", "codex")
+    supported = provider in ("claude-code", "codex", "local-opencode")
     complete = (usage.get("complete") is True and supported and
                 all(value is not None for value in [*inputs, values["output_tokens"]]))
     total["complete_launches"] += int(complete)
@@ -44,6 +64,10 @@ def _add(total: dict, usage: dict, provider: str) -> None:
         known_inputs = [value for value in inputs if value is not None]
         if known_inputs:
             total["normalized_input_tokens"] = (total["normalized_input_tokens"] or 0) + sum(known_inputs)
+            weighted = _cost_weighted(values, provider)
+            total["cost_weighted_input_tokens"] = (total["cost_weighted_input_tokens"] or 0) + weighted
+            total["_averaged"] = total.get("_averaged", 0) + 1
+            total["average_input_per_launch"] = round(total["normalized_input_tokens"] / total["_averaged"])
         known = known_inputs + ([values["output_tokens"]] if values["output_tokens"] is not None else [])
         if known:
             total["recorded_tokens"] = (total["recorded_tokens"] or 0) + sum(known)
@@ -87,6 +111,8 @@ def snapshot(root: Path, live_usages: dict[int, dict] | None = None) -> dict:
             _add(result, usage, provider)
             _add(providers.setdefault(provider, {"provider": provider, **_empty()}), usage, provider)
             _add(roles.setdefault(role, {"role": role, **_empty()}), usage, provider)
+        for bucket in (result, *providers.values(), *roles.values()):
+            bucket.pop("_averaged", None)
         result["providers"] = list(providers.values())
         result["roles"] = list(roles.values())
         if "manager_leases" in tables:

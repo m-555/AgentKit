@@ -20,8 +20,9 @@ htmlcov/
 uv.lock
 
 # AgentKit state. Runtime state is never committed (PLAN_V3.md §4.1: exactly
-# one authority per fact). In this public repository the self-hosting spec
-# (.ai/tasks.yaml, .ai/project.yaml, .ai/jobs/) also stays local.
+# one authority per fact). AgentKit is not developed through itself, so this
+# repository's own .ai/ folder stays out of Git; the patterns below also cover
+# .ai/ folders inside local test fixtures.
 /.ai/
 .ai/tasks.db
 .ai/tasks.db-wal

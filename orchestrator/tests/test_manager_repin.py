@@ -91,10 +91,32 @@ def test_repin_refuses_while_a_coordinator_process_owns_the_job(project_root, co
     assert jobs.load(project_root, codex_job["id"])["coordinator_model"]["provider"] == "codex"
 
 
-@pytest.mark.parametrize("profile", ["sonnet", "qwen", "missing"])
+@pytest.mark.parametrize("profile", ["astra", "sonnet", "qwen", "missing"])
 def test_repin_accepts_only_control_profiles(project_root, conn, codex_job, profile):
     with pytest.raises(ValueError):
         manager_repin.repin(conn, project_root, codex_job["id"], profile, EVIDENCE)
+
+
+def test_repin_appoints_sol_as_the_codex_manager(project_root, conn, codex_job):
+    manager_repin.repin(conn, project_root, codex_job["id"], "opus", EVIDENCE)
+    result = manager_repin.repin(conn, project_root, codex_job["id"], "sol", EVIDENCE)
+    job = jobs.load(project_root, codex_job["id"])
+    assert job["coordinator"] == "codex"
+    assert job["coordinator_model"] == models.PROFILES["sol"].to_dict() == result["pinned"]
+
+
+def test_cli_repin_offers_sol_and_opus_but_not_astra():
+    import argparse
+
+    from agentkit import cli_manager
+    parser = argparse.ArgumentParser()
+    cli_manager.configure(parser.add_subparsers(dest="command"), lambda *_: 0)
+    for name in ("sol", "opus"):
+        args = parser.parse_args(["manager", "repin", "job", "--profile", name, "--evidence-file", "e"])
+        assert args.profile == name
+    for name in ("sonnet", "astra"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["manager", "repin", "job", "--profile", name, "--evidence-file", "e"])
 
 
 def test_repin_needs_evidence_and_a_different_pin(project_root, conn, codex_job):

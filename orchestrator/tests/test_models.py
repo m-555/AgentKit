@@ -60,8 +60,9 @@ def test_worker_preference_and_provider_quota(state):
     assert choose(state, complexity="complex") is None
 
 
-@pytest.mark.parametrize("profile", ["sonnet", "qwen"])
-@pytest.mark.parametrize("kind,complexity", [("SAFE_PARALLEL", "complex"), ("HOTSPOT", "easy"), ("CONTRACT_CHANGE", "easy")])
+@pytest.mark.parametrize("profile,kind,complexity", [
+    ("sonnet", "SAFE_PARALLEL", "complex"), ("sonnet", "HOTSPOT", "easy"), ("sonnet", "CONTRACT_CHANGE", "easy"),
+    ("qwen", "HOTSPOT", "easy"), ("qwen", "CONTRACT_CHANGE", "standard"), ("qwen", "DECOUPLE", "complex")])
 def test_small_models_cannot_receive_difficult_work(profile, kind, complexity):
     with pytest.raises(ValueError):
         spec.TaskSpec.from_dict({"id": "test", "title": "Test", "kind": kind,
@@ -71,7 +72,13 @@ def test_small_models_cannot_receive_difficult_work(profile, kind, complexity):
 def test_local_assignment_is_explicit_readonly_and_promotes_after_failure(state):
     assert choose(state, kind="RESEARCH", complexity="easy").name == "sol"
     assert choose(state, kind="RESEARCH", complexity="easy", model_profile="qwen").name == "qwen"
-    assert choose(state, complexity="easy", model_profile="qwen").name == "sol"
+    # F22: an easy write task goes to Qwen only when its confinement is measured;
+    # capable() measures everything, an unprobed adapter falls back to the cloud.
+    assert choose(state, complexity="easy", model_profile="qwen").name == "qwen"
+    unmeasured = {**capable(), "local-opencode": CapabilitySet(adapter="local-opencode")}
+    conn, project = state
+    task = {"kind": "SAFE_PARALLEL", "complexity": "easy", "model_profile": "qwen"}
+    assert models.choose_worker(conn, project, task, unmeasured)[0].name == "sol"
     assert choose(state, kind="RESEARCH", complexity="easy", model_profile="qwen", attempts=1).name == "sol"
 
 
@@ -87,14 +94,14 @@ def test_control_fallback_and_pinning_preserve_memory(state):
     conn, project = state
     job = jobs.create(project.root, "draft", "Build an offline calendar")
     candidates = models.control_candidates(project, job, "coordinator")
-    assert [(p.name, p.effort) for p in candidates] == [("astra", "high"), ("opus", "high")]
+    assert [(p.name, p.effort) for p in candidates] == [("sol", "high"), ("opus", "high")]
     pinned = jobs.pin_coordinator(project.root, "draft", candidates[0])
     providers.begin_cooldown(conn, "codex", reason="limit", retry_at=datetime.now(UTC) + timedelta(hours=1))
     assert models.control_candidates(project, pinned, "coordinator") == [candidates[0]]
     assert not models.usable(conn, project, candidates[0])
     assert models.usable(conn, project, models.control_candidates(project, pinned, "review")[1])
-    project.raw = {"model_policy": {"profiles": {"astra": {"model": "different-model"}}}}
-    assert models.control_candidates(project, pinned, "coordinator")[0].model == "gpt-6-astra"
+    project.raw = {"model_policy": {"profiles": {"sol": {"model": "different-model"}}}}
+    assert models.control_candidates(project, pinned, "coordinator")[0].model == "gpt-6.1-sol"
     with pytest.raises(ValueError, match="pinned"):
         jobs.pin_coordinator(project.root, "draft", candidates[1])
     assert jobs.load(project.root, "draft")["requests"][0]["text"] == "Build an offline calendar"
@@ -104,7 +111,7 @@ def test_control_fallback_and_pinning_preserve_memory(state):
 def test_rejected_initial_model_can_fallback_only_before_work(state, started):
     conn, project = state
     jobs.create(project.root, "draft", "Keep my requirements")
-    jobs.pin_coordinator(project.root, "draft", models.profile(project, "astra", control=True))
+    jobs.pin_coordinator(project.root, "draft", models.profile(project, "sol", control=True))
     if started:
         jobs.amend(project.root, "draft", "Use existing data store")
     jobs.initial_model_rejected(project.root, conn, "draft")
@@ -116,8 +123,8 @@ def test_rejected_initial_model_can_fallback_only_before_work(state, started):
 
 @pytest.mark.parametrize("provider,role,model,effort", [
     ("codex", "implementer", "gpt-6.1-sol", "high"),
-    ("codex", "coordinator", "gpt-6-astra", "high"),
-    ("codex", "reviewer", "gpt-6-astra", "high"),
+    ("codex", "coordinator", "gpt-6.1-sol", "high"),
+    ("codex", "reviewer", "gpt-6.1-sol", "high"),
     ("claude-code", "implementer", "claude-opus-5-5", "high"),
     ("claude-code", "coordinator", "claude-opus-5-5", "high"),
     ("claude-code", "reviewer", "claude-opus-5-5", "high"),
@@ -167,8 +174,11 @@ def test_local_config_does_not_import_other_workflow(state, local_source, monkey
         assert str(project.root / ".ai/runtime/local-opencode") in launch.env[key]
     assert "orchestrator" in json.loads(local_source.read_text())["agent"]
     assert not adapter.default_capabilities().can_run("SAFE_PARALLEL")
-    with pytest.raises(ValueError, match="RESEARCH"):
+    # Without measured tool-only confinement and a qwen assignment, a write task is still refused (F22).
+    with pytest.raises(ValueError, match=r"no authorized model|RESEARCH"):
         adapter.build_launch({"id": 1, "kind": "SAFE_PARALLEL"}, project.root, "implementer", project, prompt="Edit")
+    with pytest.raises(ValueError, match="OS-sandboxed"):
+        adapter.build_launch({"id": 1, "kind": "HOTSPOT"}, project.root, "implementer", project, prompt="Edit")
 
 
 @pytest.mark.parametrize("url", ["http://0.0.0.0:8080/v1", "https://example.com/v1", "http://127.0.0.1:8080/v1?token=foo"])
@@ -238,7 +248,9 @@ def test_control_role_cannot_be_assigned_a_worker_profile(state, role):
     with pytest.raises(ValueError, match="supervisor-controlled"):
         spec.TaskSpec.from_dict({"id": "test", "title": "Test", "role": role})
     with pytest.raises(ValueError, match="default high"):
-        models.for_launch(project, {"_model_selection": models.profile(project, "sol").to_dict()}, "codex", role)
+        models.for_launch(project, {"_model_selection": models.profile(project, "sonnet").to_dict()}, "claude-code", role)
+    with pytest.raises(ValueError, match="default high"):
+        models.for_launch(project, {"_model_selection": models.PROFILES["astra"].to_dict()}, "codex", role)
 
 
 def test_research_findings_survive_mechanical_checkpoint(state):

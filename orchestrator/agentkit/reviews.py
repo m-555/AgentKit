@@ -12,7 +12,7 @@ def approve(conn: sqlite3.Connection, project: ProjectConfig, task_id: int,
     task = db.get_task(conn, task_id)
     if not task or task["status"] != "REVIEW":
         raise ValueError("only a task in REVIEW may receive a verdict")
-    if verdict not in ("PASS", "CHANGES", "REJECT") or not evidence.strip():
+    if verdict not in ("PASS", "CHANGES", "REJECT", "BLOCKED") or not evidence.strip():
         raise ValueError("a verdict and concrete review evidence are required")
     worktree = task.get("worktree")
     if not worktree or repo.head_commit(worktree) != head or not repo.is_clean(worktree):
@@ -29,6 +29,11 @@ def approve(conn: sqlite3.Connection, project: ProjectConfig, task_id: int,
         db.record_gate(conn, task_id, task["gate_level"], head, True, result.summary())
     conn.execute("INSERT INTO reviews(task_id,head_sha,verdict,reviewer,evidence,created_at) VALUES(?,?,?,?,?,?)",
                  (task_id, head, verdict, reviewer, str(db.redact(evidence)), db.utcnow()))
+    if verdict == "BLOCKED":
+        # The reviewer could not review: an infrastructure problem, never a code verdict.
+        from . import infra_stop
+        infra_stop.stop(conn, task_id, "review", evidence, head=head, actor="reviewer")
+        return
     target = "INTEGRATION_READY" if verdict == "PASS" else "FAILED"
     db.set_status(conn, task_id, target, actor="reviewer", cause=evidence[:1000])
     db.log_event(conn, task_id, "review_approved" if verdict == "PASS" else "review_rejected",
@@ -37,6 +42,36 @@ def approve(conn: sqlite3.Connection, project: ProjectConfig, task_id: int,
         db.update_task(conn, task_id, blocker=None, next_action="Exact commit approved; automatic integration follows.")
     else:
         db.update_task(conn, task_id, blocker=evidence, next_action="Address review findings: " + evidence)
+
+
+def user_accept(conn: sqlite3.Connection, project: ProjectConfig, task_id: int, *, by: str, evidence: str) -> str:
+    """The user takes a commit its review did not approve; scope and gate still have to pass."""
+    task = db.get_task(conn, task_id)
+    if not task or task["status"] != "FAILED":
+        raise ValueError("only a task whose review did not approve it can be accepted")
+    last = conn.execute("SELECT head_sha,verdict FROM reviews WHERE task_id=? AND verdict!='INVALIDATED' "
+                        "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    worktree = task.get("worktree")
+    if not worktree:
+        raise ValueError("the task has no worktree to accept")
+    head = repo.head_commit(worktree)
+    if not last or last["verdict"] not in ("CHANGES", "REJECT") or last["head_sha"] != head or not repo.is_clean(worktree):
+        raise ValueError("the reviewed commit changed since its review; retry or hint instead")
+    if not audit.audit_worktree(conn, project, worktree, task_id, record=False).clean:
+        raise ValueError("cannot approve an out-of-scope change")
+    from .worker_preparation import validate_completed
+    validate_completed(project, task, worktree)
+    from .verification import run
+    result = run(conn, project, worktree, task["gate_level"])
+    if not result.passed or repo.head_commit(worktree) != head or not repo.is_clean(worktree):
+        raise ValueError("the accepted commit failed its gate: " + result.summary())
+    db.record_gate(conn, task_id, task["gate_level"], head, True, result.summary())
+    conn.execute("INSERT INTO reviews(task_id,head_sha,verdict,reviewer,evidence,created_at) VALUES(?,?,?,?,?,?)",
+                 (task_id, head, "PASS", f"user:{by}", str(db.redact(evidence))[:4000], db.utcnow()))
+    db.set_status(conn, task_id, "INTEGRATION_READY", actor="human", cause="the user accepted the reviewed commit")
+    db.update_task(conn, task_id, blocker=None, next_action="Accepted by the user; automatic integration follows.")
+    db.log_event(conn, task_id, "review_approved", cause=evidence[:1000], detail={"head": head, "reviewer": f"user:{by}"})
+    return head
 
 
 def ensure_independent(conn: sqlite3.Connection, task: dict, process: dict) -> None:
@@ -65,10 +100,12 @@ def require_approval(conn: sqlite3.Connection, task: dict, project=None) -> str:
     if not row or row["verdict"] != "PASS" or row["head_sha"] != head:
         raise ValueError("the current worker commit has no independent PASS review")
     if project is not None:
-        from .review_policy import STAGING_REVIEWER, mode
-        if row["reviewer"] == STAGING_REVIEWER:
-            if mode(project) != "human":
+        from .review_policy import GATE_REVIEWER, STAGING_REVIEWER, mode
+        if row["reviewer"] in (STAGING_REVIEWER, GATE_REVIEWER):
+            if row["reviewer"] == STAGING_REVIEWER and mode(project) != "human":
                 raise ValueError("mechanical staging does not satisfy AI review policy")
+            if row["reviewer"] == GATE_REVIEWER and mode(project) not in ("once", "off"):
+                raise ValueError("a gate-only approval does not satisfy per-task AI review")
             from .verification import cached
             if not cached(conn, project, task["worktree"], task["gate_level"]):
                 raise ValueError("mechanical staging check inputs changed; recheck current policy")
